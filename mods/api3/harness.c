@@ -20,6 +20,7 @@
 #include "g_tdm.h"
 #endif
 #include <setjmp.h>
+#include <signal.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>

@@ -48,6 +48,8 @@ neg-openffa-grenade-fuse | openffa/p_weapon.c | api3:box | 10 | * | s/#define GR
 neg-openffa-pending | openffa/p_client.c | api3:box | 60 | t09_rocket_second_tap | s/^            client->attack_pending = true;$/            (void)0;/
 neg-openffa-crush-free | openffa/g_utils.c | api3:box | 10 | * | s/^            level.crush\[i\].framenum = 0;$/            (void)0;/
 neg-openffa-crush-limit | openffa/g_utils.c | api3:box | 60 | t12_door_crusher t12_crush_phases | s/level.framenum + (int)(0.1f \* HZ);/level.framenum + 1;/
+# a level reset restarts the frame counter: a stale overflow cooldown blocks the client
+neg-openffa-crush-reset | openffa/g_spawn.c | api3:box | 60 | t12_crush_overflow | s/^        ent->crush_framenum = 0;.*$/        (void)0;/
 # a func_object resting on a player sending usercmds hits once per world frame
 neg-openffa-object-crush | openffa/g_misc.c | api3:box | 60 | t12_falling_object_moving | s/^    if (G_CrushAllowed(self, other))$/    if (1)/
 neg-openffa-laser | openffa/g_target.c | api3:box | 60 | t11_laser | s/self->nextthink = level.framenum + FRAMEDIV;   \/\/ 100 ms beam/self->nextthink = level.framenum + 1;   \/\/ 100 ms beam/
@@ -73,6 +75,7 @@ neg-opentdm-pending | opentdm/p_client.c | api3:box | 60 | t09_rocket_tick_tap t
 neg-opentdm-pending-resume | opentdm/g_tdm_core.c | api3:box | 60 | t09_lifecycle_timeout | s/^                ent->client->attack_pending = false;$/                (void)0;/
 neg-opentdm-crush-free | opentdm/g_utils.c | api3:box | 10 | * | s/^            level.crush\[i\].framenum = 0;$/            (void)0;/
 neg-opentdm-crush-limit | opentdm/g_utils.c | api3:box | 60 | t12_door_crusher t12_crush_phases | s/level.framenum + SECS_TO_FRAMES(0.1f);/level.framenum + 1;/
+neg-opentdm-rate-zero | opentdm/g_tdm_core.c | api3:box | 60 | t01_rate_zero | s/SERVER_FPS < 10 || //
 neg-opentdm-object-crush | opentdm/g_misc.c | api3:box | 60 | t12_falling_object_moving | s/^    if (G_CrushAllowed(self, other)) {$/    if (1) {/
 neg-opentdm-hud-ceil | opentdm/g_tdm_core.c | api3:box | 60 | t15_countdown_hud t15_match_hud | s/^        secs = (time_remaining + SERVER_FPS - 1) \/ SERVER_FPS;$/        secs = ceil((float) time_remaining * FRAMETIME);/
 neg-opentdm-timeout-ceil | opentdm/g_tdm_core.c | api3:box | 60 | t15_timeout_hud | s/^        secs = (timeout_remaining + SERVER_FPS - 1) \/ SERVER_FPS;$/        secs = ceil((float) timeout_remaining * FRAMETIME);/
@@ -80,7 +83,7 @@ neg-opentdm-screenshot | opentdm/g_tdm_core.c | api3:box | 60 | t15_match_hud | 
 neg-opentdm-players | opentdm/g_cmds.c | api3:box | 60 | t15_players_time | s/enterframe) \/ SECS_TO_FRAMES(60),$/enterframe) \/ 600,/
 neg-opentdm-readyattn | opentdm/p_weapon.c | api3:box | 10 | * | /g_ready_attention->value/,/}/{/attack_pending = false/d}
 neg-opentdm-votehold | opentdm/p_weapon.c | api3:box | 10 | * | /g_vote_attention->value/,/}/{/attack_pending = false/d}
-neg-opentdm-rate-refuse | opentdm/g_tdm_core.c | api3:box | 60 | t01_rate_refuse | s/^    if (SERVER_FPS % 10 != 0 || SERVER_FPS > 60) {$/    if (SERVER_FPS > 60) {/
+neg-opentdm-rate-refuse | opentdm/g_tdm_core.c | api3:box | 60 | t01_rate_refuse | s/^    if (SERVER_FPS < 10 || SERVER_FPS % 10 != 0 || SERVER_FPS > 60) {$/    if (SERVER_FPS < 10 || SERVER_FPS > 60) {/
 neg-opentdm-carry | opentdm/g_phys.c | api3:engine | 60 | t13_linear_door | s/^        pusher->push_carry\[i\] = temp - r;$/        (void)0;/
 neg-opentdm-carry-rollback | opentdm/g_phys.c | api3:engine | 60 | t13_team_block | s/^            VectorCopy(p->carry, p->ent->push_carry);$/            (void)0;/
 neg-opentdm-carry-rollback-team | opentdm/g_phys.c | api3:engine | 60 | t13_team_block | s/^            VectorCopy(p->carry, p->ent->push_carry);$/            if (p == pushed) VectorCopy(p->carry, p->ent->push_carry);/

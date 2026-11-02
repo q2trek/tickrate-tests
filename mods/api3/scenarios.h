@@ -21,30 +21,40 @@ static void sc_smoke(void)
 }
 
 /* The engine rounds sv_fps down to a multiple of 10 before the game starts
- * (engine/scheduler t01_rate_round); a module that still sees 25 refuses it
- * instead of running a world clock the engine does not keep */
-static void sc_t01_rate_refuse(void)
+ * (engine/scheduler t01_rate_round); a module that still sees 25 or 0 refuses
+ * it instead of running a world clock the engine does not keep */
+static sigjmp_buf h_fpe_jmp;
+static void h_fpe(int sig) { (void)sig; siglongjmp(h_fpe_jmp, 1); }
+
+static void h_rate_refuse(const char *value)
 {
     jmp_buf outer;
     memcpy(outer, h_abort, sizeof(outer));
-    imp_cvar("sv_fps", "25", 0);
+    imp_cvar("sv_fps", value, 0);
     imp_cvar("sv_features", va("%d", GMF_VARIABLE_FPS), 0);
-    int refused = 0;
-    if (setjmp(h_abort))
+    int refused = 0, crashed = 0;
+    signal(SIGFPE, h_fpe);  /* a module that takes 0 divides by it */
+    if (sigsetjmp(h_fpe_jmp, 1))
+        crashed = 1;
+    else if (setjmp(h_abort))
         refused = 1;
     else {
         h_scene_base();
         h_start(h_ents);
     }
+    signal(SIGFPE, SIG_DFL);
     memcpy(h_abort, outer, sizeof(outer));
 #ifdef HARNESS_OPENTDM
     const char *want = "Invalid server FPS";
 #else
-    const char *want = "Invalid value '25' for 'sv_fps' cvar";
+    const char *want = va("Invalid value '%s' for 'sv_fps' cvar", value);
 #endif
-    CHECK(refused && !strcmp(h_errmsg, want), "sv_fps 25: the module refuses to start (error '%s')",
-          refused ? h_errmsg : "none");
+    CHECK(refused && !strcmp(h_errmsg, want), "sv_fps %s: the module refuses to start (error '%s')",
+          value, refused ? h_errmsg : crashed ? "SIGFPE" : "none");
 }
+
+static void sc_t01_rate_refuse(void) { h_rate_refuse("25"); }
+static void sc_t01_rate_zero(void) { h_rate_refuse("0"); }
 
 /* The usercmd schedules (h_tick_sched): over any second (h_rate ticks)
  * the commands last 1000 ms, at 60 Hz every tick command 16 or 17 ms; the
@@ -1453,6 +1463,22 @@ static void sc_t12_crush_overflow(void)
     CHECK(t0 >= 0 && tb == t0 + h_div - 1 && full, "A->W in the full table at frame %d, B hits W through the overflow at %d",
           t0, tb);
     CHECK(ta - tb == h_div, "table -> fallback -> table: A hits W %d ticks after B (%d)", ta - tb, h_div);
+
+#ifndef HARNESS_OPENTDM
+    /* level reset (`sv reset`, or the end of a map that rotates to itself):
+     * the frame counter restarts, a client hit by the overflow starts with an
+     * immediate hit */
+    h_cfill[1] = G_Spawn();
+    h_frames_n(h_rate);
+    hits = h_crush_run(s1, NULL, p, 1, &first, &gap);
+    CHECK(hits == 1, "overflow hit on the client before the reset (%d)", hits);
+    G_ResetLevel();
+    h_frame();
+    s1 = G_Spawn();
+    h_crush_spawn_fill();
+    hits = h_crush_run(s1, NULL, p, 1, &first, &gap);
+    CHECK(hits == 1, "level reset: the overflow hits the client at once (%d)", hits);
+#endif
 }
 
 /* A door blocked again before its next damage is due still reverses
@@ -2236,6 +2262,7 @@ static void sc_t15_players_time(void)
 static const struct { const char *name; void (*run)(void); } h_scenarios[] = {
     { "smoke", sc_smoke },
     { "t01_rate_refuse", sc_t01_rate_refuse },
+    { "t01_rate_zero", sc_t01_rate_zero },
     { "t04_cmd_schedule", sc_t04_cmd_schedule },
     { "t09_machinegun_held", sc_t09_machinegun_held },
     { "t09_hyperblaster_held", sc_t09_hyperblaster_held },
