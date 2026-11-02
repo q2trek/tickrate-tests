@@ -1,0 +1,92 @@
+# Negative controls (run.sh --negative): a mutated copy of one file of a
+# fork must make the named scenarios fail an assertion.
+#
+#   NAME | FILE | HARNESS | RATE | SCENARIOS | SED [| SED...]
+#
+# FILE      q2pro/..., openffa/..., opentdm/... (path in that checkout)
+# HARNESS   sched                 engine/scheduler on the variable-FPS server
+#           client[:KIND[:U]]     engine/client, peer KIND (new, legacy,
+#                                 oldsv), cl_updaterate U (default 0)
+#           api3:box|engine       mods/api3 of the mod FILE belongs to
+# SCENARIOS * for the harness list, or names
+# SED       sed scripts applied in order; @master takes the file of `master`
+
+# server scheduler: deadlines, hitch clamp, command allowance, event clearing
+neg-sched-deadline | q2pro/src/server/main.c | sched | 10 | * | 0,/if (sv.framecredit < FRAME_CREDIT) {/s//if (sv.framecredit <= FRAME_CREDIT) {/
+neg-sched-hitch | q2pro/src/common/common.c | sched | 10 | * | s/if (msec > 250) {/if (msec > 300) {/
+neg-sched-allowance | q2pro/src/server/main.c | sched | 10 | * | s/cl->command_msec = 1800;/cl->command_msec = 2000;/
+neg-sched-event-clear | q2pro/src/server/main.c | sched | 10 | * | s/        ent->s.event = 0;/        (void)ent;/
+# sv_fps 25 runs 20 Hz: a Com_ComputeFrametime rounding to nearest gives 30
+# (inc/common/utils.h; master's header lacks the helpers, so no @master row)
+neg-rate-round | q2pro/src/server/init.c | sched | 60 | t01_rate_round | s/^static void set_frame_time(void)$/#define Com_ComputeFrametime(r) ((frametime_t){ .time = BASE_FRAMETIME \/ Q_clip(((r) + 5) \/ BASE_FRAMERATE, 1, MAX_FRAMEDIV), .div = Q_clip(((r) + 5) \/ BASE_FRAMERATE, 1, MAX_FRAMEDIV) })\n&/
+
+# client timeline, capability handshake, batches, loopback
+neg-client-time | q2pro/src/client/entities.c | client | 60 | * | s/^        cl.servertime = t;$/        cl.servertime = framenum * CL_FRAMETIME;/
+neg-exact-reply | q2pro/src/client/parse.c | client | 60 | * | s/^            cl.frametime_exact = true;$/            (void)0;/
+neg-late-anchor | q2pro/src/client/parse.c | client | 60 | * | s/Com_FloorDiv(delta, cl.frametime.div) \* cl.frametime.div;/Q_align_down(delta, cl.frametime.div);/
+neg-legacy-downgrade | q2pro/src/server/user.c | client:legacy | 60 | * | s/^    if (!sv_client->exactfps)$/    if (0)/
+neg-batch-limit | q2pro/src/server/main.c | client | 60 | * | s/(COM_DEDICATED ? 1 : 5)/(COM_DEDICATED ? 1 : 6)/
+neg-cmd-boundary | q2pro/src/server/main.c | client | 60 | * | s/if (!COM_DEDICATED \&\& cmd_buffer.cursize != cmdsize)$/if (0)/
+neg-cmd-hold | q2pro/src/server/main.c | client | 60 | * | s/^    size_t cmdsize = cmd_buffer.cursize;$/    static bool cmdhold; size_t cmdsize = cmd_buffer.cursize; if (!cmdsize) cmdhold = false;/ | s/if (!COM_DEDICATED \&\& cmd_buffer.cursize != cmdsize)$/if (!COM_DEDICATED \&\& (cmdhold || cmd_buffer.cursize != cmdsize) \&\& (cmdhold = true))/
+neg-pause-debt | q2pro/src/server/main.c | client | 60 | * | s/^            sv.framecredit %= FRAME_CREDIT;$/            (void)0;/
+neg-loopback-capacity | q2pro/src/common/net/net.c | client | 60 | * | s/^#define MAX_LOOPBACK    8$/#define MAX_LOOPBACK    4/
+# an overflow drops the oldest messages, not one more
+neg-loopback-overflow | q2pro/src/common/net/net.c | client | 60 | t06_loopback | s/^        loop->get = loop->send - MAX_LOOPBACK;$/        loop->get = loop->send - MAX_LOOPBACK + 1;/
+# world clock of the legacy integer period (16 ms at 60 Hz)
+neg-timeline-credit | q2pro/src/server/main.c | client | 60 | t02_timeline | s/^    sv.framecredit += (uint64_t)msec \* SV_FRAMERATE;$/    sv.framecredit += (uint64_t)msec * FRAME_CREDIT \/ (1000 \/ SV_FRAMERATE);/
+# an unchanged cl_updaterate sends no setting and gets no reply
+neg-rates-unchanged | q2pro/src/common/cvar.c | client:new:10 | 20 | t03_rates | s/^    if (!strcmp(value, var->string)) {$/    if (!strcmp(value, var->string) \&\& !var->changed) {/
+# master's client sends no CLS_EXACTFPS: no exact timeline at 60 Hz
+neg-client-main | q2pro/src/client/main.c | client | 60 | t02_timeline | @master
+
+# OpenFFA
+neg-openffa-hurt | openffa/g_trigger.c | api3:box | 10 | * | s/self->timestamp = level.framenum + 0.1f \* HZ;/self->timestamp = level.framenum + 0.2f * HZ;/
+neg-openffa-hurt-sound-10 | openffa/g_trigger.c | api3:box | 10 | t11_hurt_normal t11_hurt_shared t11_hurt_toggle | @master
+neg-openffa-hurt-sound-60 | openffa/g_trigger.c | api3:box | 60 | t11_hurt_normal t11_hurt_shared t11_hurt_toggle | @master
+neg-openffa-rotating-touch | openffa/g_func.c | api3:box | 10 | * | /^static void rotating_touch/,/^}/s/if (self->avelocity\[0\] || self->avelocity\[1\] || self->avelocity\[2\])/if (0)/
+neg-openffa-grenade-fuse | openffa/p_weapon.c | api3:box | 10 | * | s/#define GRENADE_TIMER       (3 \* HZ)/#define GRENADE_TIMER       (4 * HZ)/
+neg-openffa-pending | openffa/p_client.c | api3:box | 60 | t09_rocket_second_tap | s/^            client->attack_pending = true;$/            (void)0;/
+neg-openffa-crush-free | openffa/g_utils.c | api3:box | 10 | * | s/^            level.crush\[i\].framenum = 0;$/            (void)0;/
+neg-openffa-crush-limit | openffa/g_utils.c | api3:box | 60 | t12_door_crusher t12_crush_phases | s/level.framenum + (int)(0.1f \* HZ);/level.framenum + 1;/
+# a func_object resting on a player sending usercmds hits once per world frame
+neg-openffa-object-crush | openffa/g_misc.c | api3:box | 60 | t12_falling_object_moving | s/^    if (G_CrushAllowed(self, other))$/    if (1)/
+neg-openffa-laser | openffa/g_target.c | api3:box | 60 | t11_laser | s/self->nextthink = level.framenum + FRAMEDIV;   \/\/ 100 ms beam/self->nextthink = level.framenum + 1;   \/\/ 100 ms beam/
+neg-openffa-rate-refuse | openffa/g_main.c | api3:box | 60 | t01_rate_refuse | s/^            || framediv \* BASE_FRAMERATE != (int)cv->value)$/            )/
+neg-openffa-carry | openffa/g_phys.c | api3:engine | 60 | t13_linear_door | s/^        pusher->push_carry\[i\] = temp - r;$/        (void)0;/
+neg-openffa-carry-rollback | openffa/g_phys.c | api3:engine | 60 | t13_team_block | s/^            VectorCopy(p->carry, p->ent->push_carry);$/            (void)0;/
+neg-openffa-carry-rollback-team | openffa/g_phys.c | api3:engine | 60 | t13_team_block | s/^            VectorCopy(p->carry, p->ent->push_carry);$/            if (p == pushed) VectorCopy(p->carry, p->ent->push_carry);/
+neg-openffa-carry-reset | openffa/g_func.c | api3:engine | 60 | t13_carry_reset t13_train_teleport | s/^    VectorClear(ent->push_carry);   \/\/ a new path.*$/    (void)0;/
+# SV_Push without its ground shortcut leaves the rider behind
+neg-openffa-ground | openffa/g_phys.c | api3:engine | 60 | t13_team_block t14_plat | 0,/^        if (check->groundentity != pusher) {$/s//        if (1) {/
+# a client carried by a pusher without a usercmd loses its ground
+neg-openffa-ground-recheck | openffa/g_main.c | api3:engine | 60 | * | s/trace.ent == ent->groundentity \&\& trace.plane.normal\[2\] >= 0.7f)$/0)/
+neg-openffa-rotating-ride | openffa/g_func.c | api3:engine | 60 | t12_rotating_ride | /^\(static \)\{0,1\}void rotating_touch/,/^}/s/if (self->avelocity\[0\] || self->avelocity\[1\] || self->avelocity\[2\])/if (0)/
+# the carry ends with its edict: kept over the SpawnEntities memset it must fail
+neg-openffa-carry-map | openffa/g_spawn.c | api3:engine | 60 | t13_carry_map | s/^    memset(g_edicts, 0, game.maxentities \* sizeof(g_edicts\[0\]));$/    { static vec3_t k[MAX_EDICTS]; for (int j = 0; j < game.maxentities; j++) VectorCopy(g_edicts[j].push_carry, k[j]); memset(g_edicts, 0, game.maxentities * sizeof(g_edicts[0])); for (int j = 0; j < game.maxentities; j++) VectorCopy(k[j], g_edicts[j].push_carry); }/
+
+# OpenTDM
+neg-opentdm-hurt | opentdm/g_trigger.c | api3:box | 10 | * | s/self->touch_debounce_framenum = level.framenum + SECS_TO_FRAMES(0.1f);/self->touch_debounce_framenum = level.framenum + SECS_TO_FRAMES(0.2f);/
+neg-opentdm-hurt-sound-10 | opentdm/g_trigger.c | api3:box | 10 | t11_hurt_normal t11_hurt_shared t11_hurt_toggle | @master
+neg-opentdm-hurt-sound-60 | opentdm/g_trigger.c | api3:box | 60 | t11_hurt_normal t11_hurt_shared t11_hurt_toggle | @master
+neg-opentdm-rotating-touch | opentdm/g_func.c | api3:box | 10 | * | /^void rotating_touch/,/^}/s/if (self->avelocity\[0\] || self->avelocity\[1\] || self->avelocity\[2\])/if (0)/
+neg-opentdm-pending | opentdm/p_client.c | api3:box | 60 | t09_rocket_tick_tap t09_machinegun_tick_tap | s/^                client->attack_pending = true;$/                (void)0;/
+neg-opentdm-pending-resume | opentdm/g_tdm_core.c | api3:box | 60 | t09_lifecycle_timeout | s/^                ent->client->attack_pending = false;$/                (void)0;/
+neg-opentdm-crush-free | opentdm/g_utils.c | api3:box | 10 | * | s/^            level.crush\[i\].framenum = 0;$/            (void)0;/
+neg-opentdm-crush-limit | opentdm/g_utils.c | api3:box | 60 | t12_door_crusher t12_crush_phases | s/level.framenum + SECS_TO_FRAMES(0.1f);/level.framenum + 1;/
+neg-opentdm-object-crush | opentdm/g_misc.c | api3:box | 60 | t12_falling_object_moving | s/^    if (G_CrushAllowed(self, other)) {$/    if (1) {/
+neg-opentdm-hud-ceil | opentdm/g_tdm_core.c | api3:box | 60 | t15_countdown_hud t15_match_hud | s/^        secs = (time_remaining + SERVER_FPS - 1) \/ SERVER_FPS;$/        secs = ceil((float) time_remaining * FRAMETIME);/
+neg-opentdm-timeout-ceil | opentdm/g_tdm_core.c | api3:box | 60 | t15_timeout_hud | s/^        secs = (timeout_remaining + SERVER_FPS - 1) \/ SERVER_FPS;$/        secs = ceil((float) timeout_remaining * FRAMETIME);/
+neg-opentdm-screenshot | opentdm/g_tdm_core.c | api3:box | 60 | t15_match_hud | s/ - SECS_TO_FRAMES (0.5f)) {$/ - 5) {/
+neg-opentdm-players | opentdm/g_cmds.c | api3:box | 60 | t15_players_time | s/enterframe) \/ SECS_TO_FRAMES(60),$/enterframe) \/ 600,/
+neg-opentdm-readyattn | opentdm/p_weapon.c | api3:box | 10 | * | /g_ready_attention->value/,/}/{/attack_pending = false/d}
+neg-opentdm-votehold | opentdm/p_weapon.c | api3:box | 10 | * | /g_vote_attention->value/,/}/{/attack_pending = false/d}
+neg-opentdm-rate-refuse | opentdm/g_tdm_core.c | api3:box | 60 | t01_rate_refuse | s/^    if (SERVER_FPS % 10 != 0 || SERVER_FPS > 60) {$/    if (SERVER_FPS > 60) {/
+neg-opentdm-carry | opentdm/g_phys.c | api3:engine | 60 | t13_linear_door | s/^        pusher->push_carry\[i\] = temp - r;$/        (void)0;/
+neg-opentdm-carry-rollback | opentdm/g_phys.c | api3:engine | 60 | t13_team_block | s/^            VectorCopy(p->carry, p->ent->push_carry);$/            (void)0;/
+neg-opentdm-carry-rollback-team | opentdm/g_phys.c | api3:engine | 60 | t13_team_block | s/^            VectorCopy(p->carry, p->ent->push_carry);$/            if (p == pushed) VectorCopy(p->carry, p->ent->push_carry);/
+neg-opentdm-carry-reset | opentdm/g_func.c | api3:engine | 60 | t13_carry_reset t13_train_teleport | s/^    VectorClear(ent->push_carry);   \/\/ a new path.*$/    (void)0;/
+neg-opentdm-ground | opentdm/g_phys.c | api3:engine | 60 | t13_team_block t14_plat | 0,/^        if (check->groundentity != pusher) {$/s//        if (1) {/
+neg-opentdm-ground-recheck | opentdm/g_main.c | api3:engine | 60 | * | s/\&\& trace.ent == ent->groundentity$/\&\& 0/
+neg-opentdm-rotating-ride | opentdm/g_func.c | api3:engine | 60 | t12_rotating_ride | /^\(static \)\{0,1\}void rotating_touch/,/^}/s/if (self->avelocity\[0\] || self->avelocity\[1\] || self->avelocity\[2\])/if (0)/
+neg-opentdm-carry-restart | opentdm/g_utils.c | api3:engine | 60 | t13_carry_map | s/^    memset(ed, 0, sizeof(\*ed));$/    { vec3_t k; VectorCopy(ed->push_carry, k); memset(ed, 0, sizeof(*ed)); VectorCopy(k, ed->push_carry); }/
+neg-opentdm-accel-final | opentdm/g_func.c | api3:engine | 60 | t14_plat | s/^        AccelMove_Final(ent);$/        Move_Final(ent);/
