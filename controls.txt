@@ -5,8 +5,9 @@
 #
 # FILE      q2pro/..., openffa/..., opentdm/... (path in that checkout)
 # HARNESS   sched                 engine/scheduler on the variable-FPS server
-#           client[:KIND[:U]]     engine/client, peer KIND (new, legacy,
-#                                 oldsv), cl_updaterate U (default 0)
+#           client[:KIND[:U[:B]]] engine/client, peer KIND (new, legacy,
+#                                 oldsv), cl_updaterate U (default 0), engine
+#                                 build OUT/B (default bcl-fps)
 #           api3:box|engine       mods/api3 of the mod FILE belongs to
 # SCENARIOS * for the harness list, or names
 # SED       sed scripts applied in order; @master takes the file of `master`
@@ -38,6 +39,8 @@ neg-timeline-credit | q2pro/src/server/main.c | client | 60 | t02_timeline | s/^
 neg-rates-unchanged | q2pro/src/common/cvar.c | client:new:10 | 20 | t03_rates | s/^    if (!strcmp(value, var->string)) {$/    if (!strcmp(value, var->string) \&\& !var->changed) {/
 # master's client sends no CLS_EXACTFPS: no exact timeline at 60 Hz
 neg-client-main | q2pro/src/client/main.c | client | 60 | t02_timeline | @master
+# packetdup granted to the local client: duplicates of a full batch overflow the loopback queue
+neg-packetdup-loopback | q2pro/src/server/user.c | client:new:0:bcl-dup | 60 | t06_packetdup_loopback | s/^        if (sv_client->netchan.remote_address.type == NA_LOOPBACK) {$/        if (0) {/
 
 # OpenFFA
 neg-openffa-hurt | openffa/g_trigger.c | api3:box | 10 | * | s/self->timestamp = level.framenum + 0.1f \* HZ;/self->timestamp = level.framenum + 0.2f * HZ;/
@@ -46,6 +49,11 @@ neg-openffa-hurt-sound-60 | openffa/g_trigger.c | api3:box | 60 | t11_hurt_norma
 neg-openffa-rotating-touch | openffa/g_func.c | api3:box | 10 | * | /^static void rotating_touch/,/^}/s/if (self->avelocity\[0\] || self->avelocity\[1\] || self->avelocity\[2\])/if (0)/
 neg-openffa-grenade-fuse | openffa/p_weapon.c | api3:box | 10 | * | s/#define GRENADE_TIMER       (3 \* HZ)/#define GRENADE_TIMER       (4 * HZ)/
 neg-openffa-pending | openffa/p_client.c | api3:box | 60 | t09_rocket_second_tap | s/^            client->attack_pending = true;$/            (void)0;/
+neg-openffa-batch-tap | openffa/p_client.c | api3:box | 60 | t09_machinegun_batch_taps | /} else if (new_attack) {/,/}/s/^            client->attack_pending = true;$/            (void)0;/
+# a zero dir (hurt) normalized into an uninitialized vector pushes the victim
+neg-openffa-knockback-dir | openffa/g_combat.c | api3:box | 10 | t11_knockback_zero_dir | s/^            vec3_t  temp = { 0 };.*$/            vec3_t  temp;/
+neg-openffa-bfg-backoff | openffa/g_weapon.c | api3:box | 60 | t11_bfg_wall | s/VectorMA(self->s.origin, -0.1f, self->velocity, self->s.origin);/VectorMA(self->s.origin, -1 * FRAMETIME, self->velocity, self->s.origin);/
+neg-openffa-viper-roll | openffa/g_misc.c | api3:engine | 60 | t13_viper_bomb_roll | s/= diff + 100.0f \* FRAMETIME;/= diff + 10;/
 neg-openffa-crush-free | openffa/g_utils.c | api3:box | 10 | * | s/^            level.crush\[i\].framenum = 0;$/            (void)0;/
 neg-openffa-crush-limit | openffa/g_utils.c | api3:box | 60 | t12_door_crusher t12_crush_phases | s/level.framenum + (int)(0.1f \* HZ);/level.framenum + 1;/
 # a level reset restarts the frame counter: a stale overflow cooldown blocks the client
@@ -71,7 +79,16 @@ neg-opentdm-hurt | opentdm/g_trigger.c | api3:box | 10 | * | s/self->touch_debou
 neg-opentdm-hurt-sound-10 | opentdm/g_trigger.c | api3:box | 10 | t11_hurt_normal t11_hurt_shared t11_hurt_toggle | @master
 neg-opentdm-hurt-sound-60 | opentdm/g_trigger.c | api3:box | 60 | t11_hurt_normal t11_hurt_shared t11_hurt_toggle | @master
 neg-opentdm-rotating-touch | opentdm/g_func.c | api3:box | 10 | * | /^void rotating_touch/,/^}/s/if (self->avelocity\[0\] || self->avelocity\[1\] || self->avelocity\[2\])/if (0)/
-neg-opentdm-pending | opentdm/p_client.c | api3:box | 60 | t09_rocket_tick_tap t09_machinegun_tick_tap | s/^                client->attack_pending = true;$/                (void)0;/
+neg-opentdm-pending | opentdm/p_client.c | api3:box | 60 | t09_rocket_tick_tap t09_machinegun_tick_tap | /if (!client->weapon_thunk) {/,/}/s/^                client->attack_pending = true;$/                (void)0;/
+neg-opentdm-batch-tap | opentdm/p_client.c | api3:box | 60 | t09_machinegun_batch_taps | /} else if (new_attack) {/,/}/s/^                client->attack_pending = true;$/                (void)0;/
+# fire released during a timeout: the buttons of before the pause fire on resume
+neg-opentdm-timeout-release | opentdm/p_client.c | api3:box | 60 | t09_timeout_release_mg t10_timeout_release_grenade | /if (tdm_match_status == MM_TIMEOUT) {/,/}/s/^            client->buttons = ucmd->buttons;$/            (void)0;/
+# a grenade held through the pause stays armed: clearing the buttons throws it
+neg-opentdm-timeout-hold | opentdm/p_client.c | api3:box | 60 | t10_timeout_hold_grenade | /if (tdm_match_status == MM_TIMEOUT) {/,/}/s/^            client->buttons = ucmd->buttons;$/            client->buttons = 0;/
+neg-opentdm-bfg-backoff | opentdm/g_weapon.c | api3:box | 60 | t11_bfg_wall | s/VectorMA(self->s.origin, -0.1f, self->velocity, self->s.origin);/VectorMA(self->s.origin, -1 * FRAMETIME, self->velocity, self->s.origin);/
+neg-opentdm-bfg-explode | opentdm/g_weapon.c | api3:box | 60 | t11_bfg_wall | /^void bfg_touch(/,/^}/s/self->nextthink = level.framenum + SECS_TO_FRAMES(0.1f);/self->nextthink = level.framenum + 1;/
+neg-opentdm-bfg-first-laser | opentdm/g_weapon.c | api3:box | 60 | t11_bfg_wall | /^void fire_bfg(/,/^}/s/bfg->nextthink = level.framenum + SECS_TO_FRAMES(0.1f);/bfg->nextthink = level.framenum + 1;/
+neg-opentdm-viper-roll | opentdm/g_misc.c | api3:engine | 60 | t13_viper_bomb_roll | s/= diff + 100.0f \* FRAMETIME;/= diff + 10;/
 neg-opentdm-pending-resume | opentdm/g_tdm_core.c | api3:box | 60 | t09_lifecycle_timeout | s/^                ent->client->attack_pending = false;$/                (void)0;/
 neg-opentdm-crush-free | opentdm/g_utils.c | api3:box | 10 | * | s/^            level.crush\[i\].framenum = 0;$/            (void)0;/
 neg-opentdm-crush-limit | opentdm/g_utils.c | api3:box | 60 | t12_door_crusher t12_crush_phases | s/level.framenum + SECS_TO_FRAMES(0.1f);/level.framenum + 1;/

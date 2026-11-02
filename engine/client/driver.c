@@ -1737,6 +1737,36 @@ static void t06_loopback_burst(void)
     CHECK(cls.state == ca_active && cl.frame.valid, "client in the game after the bursts");
 }
 
+/* T06 with the packetdup hack compiled (a build of its own, which runs only
+ * this scenario): the server refuses packetdup to the local client, whose
+ * loopback loses nothing; two copies of every send of a full batch would
+ * overflow the loopback queue and lose a frame */
+static void t06_packetdup_loopback(void)
+{
+    CHECK(USE_PACKETDUP, "packetdup hack compiled in this build");
+    if (!h_join()) return;
+    client_t *c = h_sv_client();
+    if (!c) return;
+    const int cap = USE_FPS ? 8 : 4;
+    Cvar_Set("sv_packetdup_hack", "1");
+    h_cmd("cmd packetdup 1");
+    h_run(100);
+    CHECK(c->numpackets == 1, "packetdup 1 refused on loopback (numpackets %d)", c->numpackets);
+    unsigned drop0 = cls.netchan.total_dropped;
+    int f0 = h_nframes;
+    h_calls_reset();
+    h_calls_on = true;
+    for (int round = 0; round < 5; round++) {
+        h_tick(250);
+        for (int i = 0; i < 30; i++) h_tick(16 + i % 2);
+    }
+    h_calls_on = false;
+    CHECK(!h_frame_gaps(f0) && cls.netchan.total_dropped == drop0 && h_lp_max <= cap,
+          "full batches: every frame arrives (%d frames, %d gaps, %u dropped, up to %d datagrams per call, capacity %d)",
+          h_nframes - f0, h_frame_gaps(f0), cls.netchan.total_dropped - drop0, h_lp_max, cap);
+    CHECK(cls.state == ca_active && cl.frame.valid, "client in the game after the batches");
+}
+
 typedef struct { const char *name; void (*run)(void); int rated_only, kinds; } scenario_t;
 static const scenario_t h_scenarios[] = {
     { "t02_timeline", t02_timeline, 0, K_NEW },
@@ -1762,6 +1792,7 @@ static const scenario_t h_scenarios[] = {
     { "t05_batch_error", t05_batch_error, 0, K_NEW },
     { "t06_loopback", t06_loopback, 0, K_NEW },
     { "t06_loopback_burst", t06_loopback_burst, 0, K_NEW },
+    { "t06_packetdup_loopback", t06_packetdup_loopback, 0, K_NEW },  /* listed only in a packetdup build */
     { "fleet_host", fleet_host },     /* by name only, with CL_SERVE */
     { "fleet_peer", fleet_peer },     /* by name only, with CL_CONNECT */
     { NULL, NULL }
@@ -1783,7 +1814,8 @@ int main(int argc, char **argv)
     if (h_rate < 10 || h_rate % 10) { fprintf(stderr, "CL_RATE must be a multiple of 10\n"); return 2; }
     if (!strcmp(argv[1], "list")) {
         for (int i = 0; h_scenarios[i].name; i++)
-            if ((h_rate != 10 || !h_scenarios[i].rated_only) && (h_scenarios[i].kinds & h_kind))
+            if ((h_rate != 10 || !h_scenarios[i].rated_only) && (h_scenarios[i].kinds & h_kind) &&
+                (h_scenarios[i].run == t06_packetdup_loopback) == !!USE_PACKETDUP)
                 printf("%s\n", h_scenarios[i].name);
         return 0;
     }

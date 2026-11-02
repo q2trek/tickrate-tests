@@ -28,11 +28,12 @@ SKIP = {'openffa': {'g_curl.c', 'g_sqlite.c', 'g_udp.c'}, 'opentdm': {'sys_win32
 MOD_ARGS = {'openffa': ['-DOPENFFA_VERSION="tickrate-tests"', '-DOPENFFA_REVISION=0'],
             'opentdm': ['-DC_ONLY', '-DOPENTDM_VERSION="tickrate-tests"']}
 
-# T_Damage normalizes `dir` into an uninitialized local (VectorNormalize2
-# leaves it untouched for a zero vector); hurt/crush sources pass vec3_origin,
-# so in any build their knockback reads stale stack and can add falling
-# damage at random. The test build pins that stale value to 0.
-UB_PIN = ['-ftrivial-auto-var-init=zero']
+# Uninitialized locals get a fixed garbage pattern, so a read of stale stack
+# shows up in every run instead of depending on what the stack held (code
+# that initializes its locals is unaffected). An OpenFFA without its T_Damage
+# fix normalizes a zero `dir` into such a local and fails the hurt and crush
+# scenarios.
+UB_PIN = ['-ftrivial-auto-var-init=pattern']
 
 # gcc test_args of q2pro/meson.build that become project-wide common_args
 PROJECT_F_FLAGS = ('-fms-extensions', '-fno-math-errno', '-fno-trapping-math', '-fsigned-char')

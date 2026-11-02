@@ -21,7 +21,8 @@ Layout
   rates an upstream client or a client without variable FPS gets, loopback
   batches, demos. `capability.c` checks the handshake encoding on its own.
   With `CL_SERVE`/`CL_CONNECT` it runs as separate processes over UDP on
-  127.0.0.1 (the fleet stages).
+  127.0.0.1 (the fleet stages). A second client build with the packetdup
+  hack compiled in runs only the loopback packetdup check.
 * `mods/api3` loads OpenFFA or OpenTDM through the game API and checks hurt
   triggers, crushers, movers and riders, weapon timing, OpenTDM HUD timers, at
   every rate and under several usercmd schedules. The `engine` variant links

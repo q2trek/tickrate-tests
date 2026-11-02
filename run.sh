@@ -82,10 +82,11 @@ scenarios() {
     ((n && !fail))
 }
 
-# meson_build DIR X11 VARIABLE_FPS TARGET [SRC]: plain native build of the
-# q2pro fork (or of SRC)
+# meson_build DIR X11 VARIABLE_FPS TARGET [SRC [MESON_OPTION...]]: plain
+# native build of the q2pro fork (or of SRC)
 meson_build() {
     local dir=$1 x11=$2 fps=$3 target=$4 want=${5:-$Q2PRO} src
+    shift $(($# < 5 ? $# : 5))
     need Q2PRO || return
     [[ -d $want/src ]] || { echo "missing input: no q2pro source at $want"; return 77; }
     if [[ -f $dir/build.ninja ]]; then
@@ -95,7 +96,7 @@ meson_build() {
     else
         meson setup "$dir" "$want" -Dwrap_mode=nofallback -Dsystem-wide=false -Dsdl2=disabled -Dx11=$x11 \
             -Dwayland=disabled -Dopenal=disabled -Dsoftware-sound=disabled -Dlibcurl=disabled -Dlibjpeg=disabled \
-            -Dlibpng=disabled -Davcodec=disabled -Dgame-new-api=false -Dvariable-fps=$fps || return 1
+            -Dlibpng=disabled -Davcodec=disabled -Dgame-new-api=false -Dvariable-fps=$fps "$@" || return 1
     fi
     ninja -C "$dir" "$target" || return 1
     grep -q "define USE_FPS $([[ $fps == true ]] && echo 1 || echo 0)" "$dir/config.h" ||
@@ -249,14 +250,14 @@ control() {
         sched)
             engine_harness scheduler "$OUT/bded-fps" "$dir/build" --replace "$rel=$copy" || { echo "FAIL mutated build"; return 1; }
             bin=$dir/build/driver run=(SCHED_GAME="$dir/build/testgame.so" SCHED_BASEDIR="$dir/build/base" SCHED_RATE="$rate") ;;
-        client*)
-            IFS=: read -r _ kind update <<<"$how"
+        client*)    # client[:KIND[:UPDATERATE[:BUILD]]], BUILD an engine build in OUT (default bcl-fps)
+            IFS=: read -r _ kind update build <<<"$how"
             kind=${kind:-new}
             case $kind in
                 legacy) mapfile -t args < <(up src/client/entities.c src/client/main.c src/client/parse.c src/client/tent.c) ;;
                 oldsv) mapfile -t args < <(up src/server/user.c) ;;
             esac
-            engine_harness client "$OUT/bcl-fps" "$dir/build" "${args[@]}" --replace "$rel=$copy" ||
+            engine_harness client "$OUT/${build:-bcl-fps}" "$dir/build" "${args[@]}" --replace "$rel=$copy" ||
                 { echo "FAIL mutated build"; return 1; }
             bin=$dir/build/driver run=(CL_GAME="$dir/build/testgame.so" CL_BASE="$dir/build/base" CL_RATE="$rate"
                 CL_KIND="$kind" CL_UPDATERATE="${update:-0}") ;;
@@ -301,6 +302,8 @@ stage build-ded meson_build "$OUT/bded" disabled false q2proded
 stage build-ded-fps meson_build "$OUT/bded-fps" disabled true q2proded
 stage build-cl meson_build "$OUT/bcl" enabled false q2pro
 stage build-cl-fps meson_build "$OUT/bcl-fps" enabled true q2pro
+# the packetdup hack compiled: its build lists only t06_packetdup_loopback
+stage build-cl-dup meson_build "$OUT/bcl-dup" enabled true q2pro "$Q2PRO" -Dpacketdup-hack=true
 stage upstream-q2pro upstream Q2PRO "$Q2PRO"
 if ((NEGATIVE)); then
     stage upstream-openffa upstream OPENFFA "$OPENFFA"
@@ -319,6 +322,7 @@ stage client-fixed@10 client "$OUT/bcl" "$OUT/cl" 10 new 0
 for r in $RATES; do
     stage scheduler@$r scheduler "$OUT/bded-fps" "$OUT/sched-fps" "$r"
     stage client@$r client "$OUT/bcl-fps" "$OUT/cl-fps" "$r" new 0
+    stage client-dup@$r client "$OUT/bcl-dup" "$OUT/cl-dup" "$r" new 0
     # a request below the server rate (60 -> 30, 50 and 40 -> 20, 30 and 20 -> 10)
     ((r > 10)) && stage client-u$((r / 20 * 10))@$r client "$OUT/bcl-fps" "$OUT/cl-fps" "$r" new $((r / 20 * 10))
     # an upstream client (master's client files) and an upstream server (master's user.c)

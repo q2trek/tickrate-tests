@@ -236,6 +236,44 @@ static void h_second_tap(const char *weapon, const char *ammo, int mz, int last)
               weapon, j, h_div, after_a, shots, used);
     }
 }
+/* Two taps in one delivered batch: press, release, press, release (four
+ * usercmds of 20 ms, as the enhanced parser hands a packet's commands to
+ * ClientThink with no RunFrame between them), then nothing; in every phase
+ * of the 100 ms weapon step. When the first press fires inside the batch
+ * (every phase at 10 Hz, every phase in OpenFFA), the second is kept for
+ * the next weapon step: 2 shots, 2 ammo. When both presses come before a
+ * weapon step (OpenTDM between its steps), they are one pending request:
+ * one shot or two (info line), never more. */
+static void h_batch_taps(const char *weapon, const char *ammo, int mz)
+{
+    edict_t *p = h_armed(weapon, ammo, 50);
+    int strict = 0;
+    for (int k = 0; k < h_div; k++) {
+        h_phase(p, k);
+        int m = h_nmsgs, a = h_ammo(p);
+        h_think(p, BUTTON_ATTACK, 20);
+        h_think(p, 0, 20);
+        h_think(p, BUTTON_ATTACK, 20);
+        h_think(p, 0, 20);
+        int inpack = h_shots(p, mz, m);
+        h_frame();
+        for (int i = 0; i < 2 * h_rate; i++) h_tick(p, 0, 1);
+        int shots = h_shots(p, mz, m), used = a - h_ammo(p);
+        printf("  info %s batch taps phase %d/%d: %d in the batch, %d shots, %d ammo\n", weapon, k, h_div, inpack, shots, used);
+        if (inpack) {
+            strict++;
+            CHECK(shots == 2 && used == 2, "%s phase %d/%d: first press fired in the batch, the second is the next shot (got %d shots, %d ammo)",
+                  weapon, k, h_div, shots, used);
+        } else {
+            CHECK(shots >= 1 && shots <= 2 && used == shots, "%s phase %d/%d: both presses before a weapon step, 1 or 2 shots, ammo per shot (got %d, %d)",
+                  weapon, k, h_div, shots, used);
+        }
+    }
+    CHECK(strict > 0, "%s: the first press fired inside the batch in some phase (%d of %d)", weapon, strict, h_div);
+}
+static void sc_t09_machinegun_batch_taps(void) { h_batch_taps("machinegun", "bullets", MZ_MACHINEGUN); }
+static void sc_t09_hyperblaster_batch_taps(void) { h_batch_taps("hyperblaster", "cells", MZ_HYPERBLASTER); }
+
 static void sc_t09_rocket_second_tap(void) { h_second_tap("rocket launcher", "rockets", MZ_ROCKET, 13); }
 static void sc_t09_machinegun_second_tap(void) { h_second_tap("machinegun", "bullets", MZ_MACHINEGUN, 6); }
 static void sc_t09_hyperblaster_second_tap(void) { h_second_tap("hyperblaster", "cells", MZ_HYPERBLASTER, 21); }
@@ -960,6 +998,20 @@ static void sc_t11_hurt_shared(void)
     int da = ha - h_hp(a), db = hb - h_hp(b);
     CHECK(da + db == 10, "shared source: 10 hits per second over both players (got %d + %d)", da, db);
     CHECK(sounds == 1, "shared source: one hurt sound in the first second over both players (got %d)", sounds);
+}
+
+/* Damage with knockback but no direction (hurt and crush pass a zero
+ * dir): no push, the velocity stays what it was. */
+static void sc_t11_knockback_zero_dir(void)
+{
+    h_scene_base();
+    h_start(h_ents);
+    edict_t *p = h_join(0, "p1");
+    vec3_t dir = { 0, 0, 0 }, v = { 10, 20, 30 };
+    VectorCopy(v, p->velocity);
+    T_Damage(p, g_edicts, g_edicts, dir, p->s.origin, dir, 10, 10, 0, MOD_TRIGGER_HURT);
+    CHECK(VectorCompare(p->velocity, v), "velocity unchanged (%g %g %g)", p->velocity[0], p->velocity[1], p->velocity[2]);
+    CHECK(p->health < 100, "the damage was dealt (health %d)", p->health);
 }
 
 /* target_laser (START_ON, dmg 1) through a standing player: the beam
@@ -2038,6 +2090,90 @@ static void sc_t13_team_down_idle(void)
           "both doors reach the destination 100 units down (%.3f, %.3f)", a->s.origin[2] - az, b->s.origin[2] - bz);
 }
 
+/* misc_viper_bomb dropped (used) high above the floor: it rolls 100
+ * degrees per second while it falls (10 per 100 ms frame originally). */
+static void sc_t13_viper_bomb_roll(void)
+{
+    h_scene_base();
+    h_ent("{\n\"classname\" \"misc_viper_bomb\"\n\"origin\" \"0 0 2000\"\n}\n");
+    h_start(h_ents);
+    edict_t *bomb = h_by_class("misc_viper_bomb", 0);
+    edict_t *viper = G_Spawn();     /* the bomb takes its flight from the viper */
+    viper->classname = "misc_viper";
+    VectorSet(viper->moveinfo.dir, 1, 0, 0);
+    viper->moveinfo.speed = 100;
+    CHECK(bomb && bomb->use, "bomb spawned");
+    if (!bomb || !bomb->use) return;
+    bomb->use(bomb, g_edicts, g_edicts);
+    h_frame();
+    float r0 = bomb->s.angles[2];
+    h_frames_n(h_rate);
+    float roll = bomb->s.angles[2] - r0;
+    CHECK(bomb->inuse && bomb->s.origin[2] > 1000, "still falling (z %.0f)", bomb->s.origin[2]);
+    CHECK(fabsf(roll - 100) < 0.01f, "rolls 100 degrees in 1 s (got %.3f)", roll);
+}
+
+/* BFG ball fired from (0,0,24) along +X at 400 units/s into a wall at
+ * X=90, a player without armor at (-20,150,24) next to its path, the
+ * owner out of the way; in every phase of the 100 ms step. At 10 Hz: two
+ * laser hits of 5 in flight (frames 1 and 2, the ball touches the wall in
+ * frame 3), then the secondary explosion 100 ms after the touch from the
+ * touch point moved back by 100 ms of flight (x = 90 - 40 = 50):
+ * 200 * (1 - sqrt(|(50,0,24) - (-20,150,28)| / 1000)) = 118 damage.
+ * OpenTDM keeps that timing in world time. OpenFFA starts the laser and
+ * the explosion on its 100 ms keyframe grid (1..FRAMEDIV frames): the
+ * laser hits are shown, not checked. The explosion damage is the same in
+ * both mods at every rate. */
+typedef struct { int lasers, touch, explode, boom; } hbfg_t;
+static hbfg_t h_bfg_shot(edict_t *owner, edict_t *target)
+{
+    hbfg_t r = { 0, -1, -1, 0 };
+    vec3_t start = { 0, 0, 24 }, dir = { 1, 0, 0 };
+    target->health = 1000;
+    for (int ai; (ai = ArmorIndex(target)); ) target->client->inventory[ai] = 0;
+    fire_bfg(owner, start, dir, 200, 400, 1000);
+    edict_t *bfg = h_by_class("bfg blast", 0);
+    if (!bfg) return r;
+    for (int f = 1; f <= 2 * h_rate && r.explode < 0; f++) {
+        int hp = target->health, flying = bfg->touch != NULL;
+        h_frame();
+        int d = hp - target->health;
+        if (flying && !bfg->touch) r.touch = f;
+        if (bfg->inuse && bfg->s.frame >= 1) { r.explode = f; r.boom = d; }
+        else r.lasers += d / 5;
+    }
+    return r;
+}
+
+static void sc_t11_bfg_wall(void)
+{
+    h_scene_base();
+    h_ent("{\n\"classname\" \"info_player_deathmatch\"\n\"origin\" \"-300 0 24\"\n\"angle\" \"0\"\n}\n");
+    h_add_world(90, -512, 0, 128, 512, 512);
+    h_start(h_ents);
+    edict_t *owner = h_join(0, "p1"), *target = h_join(1, "p2");
+    VectorSet(owner->s.origin, -300, 0, 24);
+    imp_linkentity(owner);
+    VectorSet(target->s.origin, -20, 150, 24);
+    imp_linkentity(target);
+    for (int k = 0; k < h_div; k++) {
+        while (h_frames % h_div != k) h_frame();
+        hbfg_t r = h_bfg_shot(owner, target);
+        int delay = r.explode - r.touch;
+        printf("  info phase %d/%d: %d laser hits, touch in frame %d, explosion %d frames later, %d damage\n",
+               k, h_div, r.lasers, r.touch, delay, r.boom);
+        CHECK(r.touch > 0 && r.explode > 0, "phase %d/%d: the ball touches the wall and explodes", k, h_div);
+        CHECK(r.boom == 118, "phase %d/%d: secondary explosion 118 damage, as at 10 Hz (got %d)", k, h_div, r.boom);
+#ifdef HARNESS_OPENTDM
+        CHECK(r.lasers == 2, "phase %d/%d: 2 laser hits in flight, as at 10 Hz (got %d)", k, h_div, r.lasers);
+        CHECK(delay == h_div, "phase %d/%d: explosion 100 ms (%d frames) after the touch (got %d)", k, h_div, h_div, delay);
+#else
+        CHECK(delay >= 1 && delay <= h_div, "phase %d/%d: explosion on the next 100 ms keyframe (1..%d frames, got %d)", k, h_div, h_div, delay);
+#endif
+        h_frames_n(h_rate);
+    }
+}
+
 /* ---------------------------------------------------------------- T15 */
 
 #ifdef HARNESS_OPENTDM
@@ -2257,6 +2393,69 @@ static void sc_t15_players_time(void)
               ticks, want, line ? line + 1 : "(none)");
     }
 }
+
+/* Fire released (or a grenade still held) during a timeout. Attack held
+ * into the pause, then usercmds during it: released (machinegun, a cooking
+ * grenade) or still held (grenade); after resume no usercmd at all and a
+ * window of 3 weapon steps (the extra 10 Hz shot comes on the second). The
+ * pause starts in every phase of the weapon step. Released: no shot after
+ * resume, the grenade is thrown in the window and does not go off in the
+ * hand. Held: the grenade stays cooking in the window, then a release
+ * throws it. */
+enum { H_TO_MG, H_TO_RELEASE, H_TO_HOLD };
+static void h_timeout_fire(int kind)
+{
+    h_set_override("g_timeout_limit", "0");     /* one timeout per phase */
+    edict_t *a, *b;
+    h_tdm_pair(&a, &b);
+    if (!h_tdm_start(a, b)) return;
+    /* nobody dies: a respawn (random spawn point) could telefrag the other */
+    a->flags |= FL_GODMODE;
+    b->flags |= FL_GODMODE;
+    for (int k = 0; k < h_div; k++) {
+        if (kind == H_TO_MG) {
+            h_give(a, "machinegun", 0);
+            h_give(a, "bullets", 100);
+            h_use(a, "machinegun");
+            for (int i = 0; i < h_rate / 2; i++) h_tick(a, BUTTON_ATTACK, 1);
+        } else {
+            h_give(a, "grenades", 5);
+            h_use(a, "grenades");
+            CHECK(h_arm_grenade(a) >= 0, "phase %d: grenade armed", k);
+        }
+        /* the next weapon step k world frames ahead */
+        for (int i = 0; i < 3 * h_div && a->client->next_weapon_think - level.framenum != k; i++)
+            h_tick(a, BUTTON_ATTACK, 1);
+        CHECK(a->client->next_weapon_think - level.framenum == k, "phase %d/%d of the weapon step", k, h_div);
+        int ammo = h_ammo(a), m0 = h_nmsgs;
+        h_client_command(a, "time");
+        CHECK(tdm_match_status == MM_TIMEOUT, "phase %d: timeout (status %d)", k, tdm_match_status);
+        for (int i = 0; i < h_rate; i++) h_tick(a, kind == H_TO_HOLD ? BUTTON_ATTACK : 0, 1);
+        h_client_command(a, "time");
+        for (int i = 0; i < 15 * h_rate && tdm_match_status == MM_TIMEOUT; i++) h_frame();
+        CHECK(tdm_match_status == MM_PLAYING, "phase %d: resumed (status %d)", k, tdm_match_status);
+        h_frames_n(3 * h_div);
+        edict_t *g = h_grenade();
+        if (kind == H_TO_MG) {
+            int shots = h_shots(a, MZ_MACHINEGUN, m0);
+            CHECK(shots == 0 && h_ammo(a) == ammo, "phase %d/%d: released in the pause, no shot after resume (got %d, %d bullets spent)",
+                  k, h_div, shots, ammo - h_ammo(a));
+        } else if (kind == H_TO_RELEASE) {
+            CHECK(g && !h_explosions(m0) && h_ammo(a) == ammo - 1,
+                  "phase %d/%d: released in the pause, thrown in 3 steps after resume (grenade %s, %d explosions, %d spent)",
+                  k, h_div, g ? "flying" : "none", h_explosions(m0), ammo - h_ammo(a));
+        } else {
+            CHECK(!g && !h_explosions(m0) && h_ammo(a) == ammo, "phase %d/%d: held through the pause, still cooking (grenade %s, %d explosions)",
+                  k, h_div, g ? "flying" : "none", h_explosions(m0));
+            for (int i = 0; i < 3 * h_div && !g; i++) { h_tick(a, 0, 1); g = h_grenade(); }
+            CHECK(g != NULL, "phase %d/%d: then released, thrown", k, h_div);
+        }
+        for (int i = 0; i < 5 * h_rate; i++) h_tick(a, 0, 1);  /* the grenade goes off */
+    }
+}
+static void sc_t09_timeout_release_mg(void) { h_timeout_fire(H_TO_MG); }
+static void sc_t10_timeout_release_grenade(void) { h_timeout_fire(H_TO_RELEASE); }
+static void sc_t10_timeout_hold_grenade(void) { h_timeout_fire(H_TO_HOLD); }
 #endif
 
 static const struct { const char *name; void (*run)(void); } h_scenarios[] = {
@@ -2276,6 +2475,8 @@ static const struct { const char *name; void (*run)(void); } h_scenarios[] = {
     { "t09_machinegun_second_tap", sc_t09_machinegun_second_tap },
     { "t09_hyperblaster_second_tap", sc_t09_hyperblaster_second_tap },
 #endif
+    { "t09_machinegun_batch_taps", sc_t09_machinegun_batch_taps },
+    { "t09_hyperblaster_batch_taps", sc_t09_hyperblaster_batch_taps },
     { "t09_rocket_tap_spam", sc_t09_rocket_tap_spam },
     { "t09_machinegun_tap_spam", sc_t09_machinegun_tap_spam },
     { "t09_rocket_noammo", sc_t09_rocket_noammo },
@@ -2305,6 +2506,8 @@ static const struct { const char *name; void (*run)(void); } h_scenarios[] = {
     { "t11_hurt_god_no_protection", sc_t11_hurt_no_protection_god },
     { "t11_hurt_shared", sc_t11_hurt_shared },
     { "t11_laser", sc_t11_laser },
+    { "t11_knockback_zero_dir", sc_t11_knockback_zero_dir },
+    { "t11_bfg_wall", sc_t11_bfg_wall },
     { "t12_door_blocked_reverses", sc_t12_door_blocked_reverses },
     { "t12_door_crusher", sc_t12_door_crusher },
     { "t12_door_debris", sc_t12_door_debris },
@@ -2328,6 +2531,7 @@ static const struct { const char *name; void (*run)(void); } h_scenarios[] = {
     { "t13_carry_reset", sc_t13_carry_reset },
     { "t13_train_teleport", sc_t13_train_teleport },
     { "t13_carry_map", sc_t13_carry_map },
+    { "t13_viper_bomb_roll", sc_t13_viper_bomb_roll },
     { "t14_plat", sc_t14_plat },
     { "t14_plat_zero", sc_t14_plat_zero },
     { "t14_plat_down", sc_t14_plat_down },
@@ -2338,6 +2542,9 @@ static const struct { const char *name; void (*run)(void); } h_scenarios[] = {
     { "t15_match_hud", sc_t15_match_hud },
     { "t15_timeout_hud", sc_t15_timeout_hud },
     { "t15_players_time", sc_t15_players_time },
+    { "t09_timeout_release_mg", sc_t09_timeout_release_mg },
+    { "t10_timeout_release_grenade", sc_t10_timeout_release_grenade },
+    { "t10_timeout_hold_grenade", sc_t10_timeout_hold_grenade },
 #endif
     { NULL, NULL }
 };
