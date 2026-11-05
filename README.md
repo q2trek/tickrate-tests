@@ -23,6 +23,13 @@ Layout
   With `CL_SERVE`/`CL_CONNECT` it runs as separate processes over UDP on
   127.0.0.1 (the fleet stages). A second client build with the packetdup
   hack compiled in runs only the loopback packetdup check.
+  `remote_lerp_test.c` checks the smoothing of other players
+  (`cl_remote_lerp`) on its own: history, delay, teleports, stops, rate
+  changes, senders that jitter.
+* `engine/server/status_n.py` asks a fork server at each rate for its
+  serverinfo (`sv_fps` is published) and for `status n` (the pacing table
+  and the recommended client packet rate, with one bare protocol 34 client
+  connected).
 * `mods/api3` loads OpenFFA or OpenTDM through the game API and checks hurt
   triggers, crushers, movers and riders, weapon timing, OpenTDM HUD timers, at
   every rate and under several usercmd schedules. The `engine` variant links

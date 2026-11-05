@@ -227,6 +227,31 @@ fleet_upstream() {
     return $rc
 }
 
+# status_n RATE: the fork server publishes sv_fps in serverinfo and has `status n`
+status_n() {
+    local r=$1 port dir=$OUT/cl-fps host pw=tt$RANDOM$RANDOM rc
+    need Q2PRO Q2_DATA || return
+    [[ -x $OUT/bded-fps/q2proded && -f $dir/testgame.so ]] ||
+        { echo "missing input: $OUT/bded-fps/q2proded or $dir/testgame.so (built by earlier stages)"; return 77; }
+    port=$(free_port) || return 1
+    timeout -k 5 30 "$OUT/bded-fps/q2proded" +set basedir "$dir/base" +set homedir "$dir/base" +set sys_console 0 \
+        +set sys_forcegamelib "$dir/testgame.so" +set logfile 0 +set deathmatch 1 +set maxclients 4 +set rcon_password "$pw" \
+        +set net_ip 127.0.0.1 +set net_port "$port" +set sv_fps "$r" +map "$Q2_MAP" &
+    host=$!
+    python3 "$HERE/engine/server/status_n.py" "$port" "$pw" "$r"
+    rc=$?
+    kill "$host" 2>/dev/null
+    wait "$host"
+    return $rc
+}
+
+# remote_lerp: host test of the client's remote player smoothing module
+remote_lerp() {
+    need Q2PRO || return
+    cc -std=c99 -Wall -Wextra -Werror -O2 -I"$Q2PRO/src/client" "$HERE/engine/client/remote_lerp_test.c" \
+        "$Q2PRO/src/client/remote_lerp.c" -lm -o "$OUT/remote_lerp_test" && "$OUT/remote_lerp_test"
+}
+
 # control NAME FILE HARNESS RATE SCENARIOS SED...: see controls.txt. PASS
 # when a scenario fails an assertion (a crash or a timeout is not a catch)
 control() {
@@ -316,6 +341,7 @@ if ((NEGATIVE)); then
     done <"$HERE/controls.txt"
 else
 stage capability capability
+stage remote-lerp remote_lerp
 # the fixed (10 Hz only) engine
 stage scheduler-fixed@10 scheduler "$OUT/bded" "$OUT/sched" 10
 stage client-fixed@10 client "$OUT/bcl" "$OUT/cl" 10 new 0
@@ -338,6 +364,7 @@ done
 # real time over UDP: rates written to a fork client, an upstream client, a
 # client without variable FPS and one on protocol 34 by one fork server
 # (README, expected rates)
+for r in $RATES; do stage status-n@$r status_n "$r"; done
 stage fleet@30 fleet 30 30 10 10
 stage fleet@50 fleet 50 50 50 10
 stage fleet@60 fleet 60 60 20 10
