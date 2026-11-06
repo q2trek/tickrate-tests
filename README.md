@@ -1,14 +1,14 @@
 tickrate-tests
 ==============
 
-Tests for the `tickrate` branches of q2trek/q2pro, q2trek/openffa and
+Tests for the `master` branches of q2trek/q2pro, q2trek/openffa and
 q2trek/opentdm: exact frame times at every server rate from 10 to 60 Hz, mixed
 clients and servers, and the game code that has to keep real time when a world
 step is shorter than 100 ms.
 
 The harnesses link the real engine and game code. Nothing is copied from the
 forks: each run builds the checkouts you point it at, and the upstream peers
-and negative controls come from their `master` branch.
+and negative controls come from their upstream branch (`origin/master`).
 
 Layout
 ------
@@ -66,11 +66,13 @@ Running
 
     Q2_DATA=/path/to/quake2 ./run.sh ../q2pro ../openffa ../opentdm
 
-The three arguments are checkouts with the `tickrate` branch checked out and a
-`master` (or `origin/master`) branch. `RATES` limits the server rates (default
-`10 20 30 40 50 60`; any other list is a partial run), `Q2_MAP` picks the map
-(default `q2dm1`), `OUT` is where builds and logs go (default
-`$TMPDIR/tickrate-tests`).
+The three arguments are checkouts of the forks with `master` checked out and
+the upstream repository as the `origin` remote (in a clone of the fork, add it:
+`git remote add origin https://github.com/q2pro/q2pro.git`, and so on).
+`UPSTREAM_REF` names another upstream ref (default `origin/master`). `RATES`
+limits the server rates (default `10 20 30 40 50 60`; any other list is a
+partial run), `Q2_MAP` picks the map (default `q2dm1`), `OUT` is where builds
+and logs go (default `$TMPDIR/tickrate-tests`).
 
 Every stage ends PASS, FAIL or NOT_RUN (a missing input, with the reason on the
 first line of its log in `$OUT/log`). The exit code is 0 only when every stage
@@ -80,7 +82,7 @@ passed. `--only REGEX` and a shorter `RATES` run a subset for debugging and exit
     Q2_DATA=/path/to/quake2 ./run.sh --negative ../q2pro ../openffa ../opentdm
 
 runs the negative controls instead: each one copies a fork file, breaks the
-behavior under test with a sed script (or takes the file from `master`),
+behavior under test with a sed script (or takes the file from upstream),
 rebuilds the harness with it and expects a scenario to fail an assertion. A
 crash, a timeout, a game error or a failed precondition doesn't count as a
 catch.

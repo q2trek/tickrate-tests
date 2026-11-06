@@ -3,9 +3,9 @@
 #
 #   ./run.sh [--negative] [--only REGEX] Q2PRO OPENFFA OPENTDM
 #
-# Q2PRO, OPENFFA, OPENTDM: checkouts of the forks (branch tickrate). Their
-# `master` (or `origin/master`) is the upstream the peers and controls come
-# from. Environment:
+# Q2PRO, OPENFFA, OPENTDM: checkouts of the forks (branch master). Their
+# UPSTREAM_REF (default origin/master, origin being the upstream remote) is the
+# upstream the peers and controls come from. Environment:
 #   Q2_DATA  Quake 2 directory with baseq2/pak*.pak (engine stages need a map)
 #   Q2_MAP   deathmatch map of that data (default q2dm1)
 #   RATES    server rates (default "10 20 30 40 50 60")
@@ -103,15 +103,13 @@ meson_build() {
         { echo "FAIL USE_FPS of $dir does not match variable-fps=$fps"; return 1; }
 }
 
-# upstream NAME DIR: `master` of a checkout, extracted into OUT/upstream/NAME
+# upstream NAME DIR: UPSTREAM_REF of a checkout, extracted into OUT/upstream/NAME
 upstream() {
     local name=$1 dir=$2 ref
     need "$name" || return
-    for ref in master origin/master; do
-        git -C "$dir" rev-parse -q --verify "$ref^{commit}" >/dev/null && break
-        ref=
-    done
-    [[ -n $ref ]] || { echo "missing input: $name has no master or origin/master"; return 77; }
+    ref=${UPSTREAM_REF:-origin/master}
+    git -C "$dir" rev-parse -q --verify "$ref^{commit}" >/dev/null ||
+        { echo "missing input: $name has no $ref"; return 77; }
     rm -rf "$OUT/upstream/$name"
     mkdir -p "$OUT/upstream/$name"
     git -C "$dir" archive "$ref" | tar -x -C "$OUT/upstream/$name" && echo "$name upstream: $ref $(git -C "$dir" rev-parse --short "$ref")"
@@ -138,7 +136,7 @@ client() {             # client ENGINE_BUILD DIR RATE KIND UPDATERATE [--replace
             CL_UPDATERATE="$update"
 }
 
-# master's copy of a q2pro file as a --replace argument
+# upstream's copy of a q2pro file as a --replace argument
 up() { local f; for f; do printf -- '--replace\n%s=%s\n' "$f" "$OUT/upstream/Q2PRO/$f"; done; }
 client_kind() {        # client_kind KIND RATE FILE...
     local kind=$1 rate=$2 args
@@ -205,7 +203,7 @@ fleet() {              # fleet RATE NEW LEGACY NOFPS: expected rates of the peer
         "h_nofps $OUT/cl CL_RATE=$r" "h_v34 $OUT/cl CL_RATE=$r CL_PROTOCOL=34" || { kill "${PIDS[@]}"; return 77; }
     collect
 }
-# an upstream dedicated server (master, variable FPS) at RATE with the fork client
+# an upstream dedicated server (UPSTREAM_REF, variable FPS) at RATE with the fork client
 fleet_upstream() {
     local r=$1 port dir=$OUT/cl-fps host
     need Q2PRO Q2_DATA || return
@@ -351,7 +349,7 @@ for r in $RATES; do
     stage client-dup@$r client "$OUT/bcl-dup" "$OUT/cl-dup" "$r" new 0
     # a request below the server rate (60 -> 30, 50 and 40 -> 20, 30 and 20 -> 10)
     ((r > 10)) && stage client-u$((r / 20 * 10))@$r client "$OUT/bcl-fps" "$OUT/cl-fps" "$r" new $((r / 20 * 10))
-    # an upstream client (master's client files) and an upstream server (master's user.c)
+    # an upstream client (upstream's client files) and an upstream server (upstream's user.c)
     stage client-legacy@$r client_kind legacy "$r" src/client/entities.c src/client/main.c src/client/parse.c \
         src/client/tent.c
     stage client-oldsv@$r client_kind oldsv "$r" src/server/user.c

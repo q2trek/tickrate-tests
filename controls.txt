@@ -10,7 +10,8 @@
 #                                 build OUT/B (default bcl-fps)
 #           api3:box|engine       mods/api3 of the mod FILE belongs to
 # SCENARIOS * for the harness list, or names
-# SED       sed scripts applied in order; @master takes the file of `master`
+# SED       sed scripts applied in order; @master takes the file of upstream
+#           (UPSTREAM_REF, default origin/master)
 
 # server scheduler: deadlines, hitch clamp, command allowance, event clearing
 neg-sched-deadline | q2pro/src/server/main.c | sched | 10 | * | 0,/if (sv.framecredit < FRAME_CREDIT) {/s//if (sv.framecredit <= FRAME_CREDIT) {/
@@ -18,7 +19,7 @@ neg-sched-hitch | q2pro/src/common/common.c | sched | 10 | * | s/if (msec > 250)
 neg-sched-allowance | q2pro/src/server/main.c | sched | 10 | * | s/cl->command_msec = 1800;/cl->command_msec = 2000;/
 neg-sched-event-clear | q2pro/src/server/main.c | sched | 10 | * | s/        ent->s.event = 0;/        (void)ent;/
 # sv_fps 25 runs 20 Hz: a Com_ComputeFrametime rounding to nearest gives 30
-# (inc/common/utils.h; master's header lacks the helpers, so no @master row)
+# (inc/common/utils.h; upstream's header lacks the helpers, so no @master row)
 neg-rate-round | q2pro/src/server/init.c | sched | 60 | t01_rate_round | s/^static void set_frame_time(void)$/#define Com_ComputeFrametime(r) ((frametime_t){ .time = BASE_FRAMETIME \/ Q_clip(((r) + 5) \/ BASE_FRAMERATE, 1, MAX_FRAMEDIV), .div = Q_clip(((r) + 5) \/ BASE_FRAMERATE, 1, MAX_FRAMEDIV) })\n&/
 
 # client timeline, capability handshake, batches, loopback
@@ -37,7 +38,7 @@ neg-loopback-overflow | q2pro/src/common/net/net.c | client | 60 | t06_loopback 
 neg-timeline-credit | q2pro/src/server/main.c | client | 60 | t02_timeline | s/^    sv.framecredit += (uint64_t)msec \* SV_FRAMERATE;$/    sv.framecredit += (uint64_t)msec * FRAME_CREDIT \/ (1000 \/ SV_FRAMERATE);/
 # an unchanged cl_updaterate sends no setting and gets no reply
 neg-rates-unchanged | q2pro/src/common/cvar.c | client:new:10 | 20 | t03_rates | s/^    if (!strcmp(value, var->string)) {$/    if (!strcmp(value, var->string) \&\& !var->changed) {/
-# master's client sends no CLS_EXACTFPS: no exact timeline at 60 Hz
+# upstream's client sends no CLS_EXACTFPS: no exact timeline at 60 Hz
 neg-client-main | q2pro/src/client/main.c | client | 60 | t02_timeline | @master
 # packetdup granted to the local client: duplicates of a full batch overflow the loopback queue
 neg-packetdup-loopback | q2pro/src/server/user.c | client:new:0:bcl-dup | 60 | t06_packetdup_loopback | s/^        if (sv_client->netchan.remote_address.type == NA_LOOPBACK) {$/        if (0) {/
