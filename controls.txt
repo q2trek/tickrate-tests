@@ -126,3 +126,10 @@ neg-opentdm-powerup-warning | opentdm/p_view.c | api3:box | 60 | t18_powerup_war
 neg-opentdm-kick-clock | opentdm/p_view.c | api3:box | 60 | t18_kick_timeout | /void SV_CalcViewOffset/,/^}/s/if (FRAMESYNC)/if ((level.framenum % SECS_TO_FRAMES(0.1f)) == 0)/
 neg-opentdm-environment-clock | opentdm/p_view.c | api3:box | 60 | t18_environment_resume | /void P_WorldEffects/,/^}/s/if (FRAMESYNC)/if ((level.framenum % SECS_TO_FRAMES(0.1f)) == 0)/
 
+# Remote history reserve, anchors, path selection and presentation clock.
+neg-remote-reserve | q2pro/src/client/remote_lerp.c | remote | 60 | * | s/fminf(r->extra + I, I + RL_MAX_EXTRA)/r->extra/
+neg-remote-anchor | q2pro/src/client/remote_lerp.c | remote | 60 | * | s/if (e->moved)/if (0)/ | s/if (e->turned)/if (0)/
+neg-remote-steady | q2pro/src/client/remote_lerp.c | remote | 60 | * | s/\&\& !c->nolerp;/\&\& !c->nolerp \&\& extra > 0;/
+neg-remote-clock | q2pro/src/client/remote_lerp.c | remote | 60 | * | s/RL_At(r, r->P, S + I, o);/RL_At(r, t, S + I, o);/
+neg-remote-pause | q2pro/src/client/remote_lerp.c | remote | 60 | * | s/} else if (!paused) {/} else if (1) {/ | s/    unsigned dt_real =/    (void)paused; unsigned dt_real =/
+neg-remote-cap | q2pro/src/client/remote_lerp.c | remote | 60 | * | s/r->P = fminf(r->P, rec(r, 0)->s.t);/(void)0;/

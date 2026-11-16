@@ -25,14 +25,20 @@ Layout
   hack compiled in runs only the loopback packetdup check.
   `remote_lerp_test.c` checks the smoothing of other players
   (`cl_remote_lerp`) on its own: history, delay, teleports, stops, rate
-  changes, senders that jitter.
+  changes, senders that jitter, the snapshot reserve and dropped anchors.
+  It also checks presentation clocks with late delivery, pause/resume, long
+  gaps, rate changes, real-time counter wrap and a deterministic delivery
+  jitter profile. `controls.txt` contains mutations of these paths.
 * `engine/server/status_n.py` asks a fork server at each rate for its
   serverinfo (`sv_fps` is published) and for `status n` (the pacing table
   and the recommended client packet rate, with one bare protocol 34 client
   connected).
 * `mods/api3` loads OpenFFA or OpenTDM through the game API and checks hurt
   triggers, crushers, movers and riders, weapon timing, OpenTDM HUD timers, at
-  every rate and under several usercmd schedules. The `engine` variant links
+  every rate and under several usercmd schedules. OpenTDM scenarios also
+  check the 200 ms ghost limit, ping jitter, fixed-engine fallback and real
+  100 ms view feedback (including timeout and environment damage on resume).
+  The `engine` variant links
   the q2pro collision code and a generated BSP.
 * `run.sh` builds everything and runs the stages, `controls.txt` lists the
   negative controls.

@@ -52,7 +52,7 @@ stage() {
     case $rc in
         0) SUMMARY+=("PASS     $name") ;;
         77) SUMMARY+=("NOT_RUN  $name: $(head -1 "$log")") ;;
-        *) grep -E '^ *FAIL|error' "$log" | head -8
+        *) command grep -E '^ *FAIL|error' "$log" | head -8
            SUMMARY+=("FAIL     $name (log/$name.log)") ;;
     esac
 }
@@ -99,7 +99,7 @@ meson_build() {
             -Dlibpng=disabled -Davcodec=disabled -Dgame-new-api=false -Dvariable-fps=$fps "$@" || return 1
     fi
     ninja -C "$dir" "$target" || return 1
-    grep -q "define USE_FPS $([[ $fps == true ]] && echo 1 || echo 0)" "$dir/config.h" ||
+    command grep -q "define USE_FPS $([[ $fps == true ]] && echo 1 || echo 0)" "$dir/config.h" ||
         { echo "FAIL USE_FPS of $dir does not match variable-fps=$fps"; return 1; }
 }
 
@@ -284,6 +284,10 @@ control() {
                 { echo "FAIL mutated build"; return 1; }
             bin=$dir/build/driver run=(CL_GAME="$dir/build/testgame.so" CL_BASE="$dir/build/base" CL_RATE="$rate"
                 CL_KIND="$kind" CL_UPDATERATE="${update:-0}") ;;
+        remote)
+            cc -std=c99 -Wall -Wextra -Werror -O2 -I"$Q2PRO/src/client" "$HERE/engine/client/remote_lerp_test.c" \
+                "$copy" -lm -o "$dir/remote_lerp_test" || { echo "FAIL mutated build"; return 1; }
+            bin=$dir/remote_lerp_test list=all ;;
         api3:*)
             [[ ${how#api3:} == engine ]] && args=(--engine)
             python3 "$HERE/mods/api3/build.py" --engine-build "$OUT/bded-fps" --out "$dir/build" --mod "${var,,}" \
@@ -293,9 +297,9 @@ control() {
     esac
     [[ $list == '*' ]] && list=$(env "${run[@]}" "$bin" list)
     for s in $list; do
-        out=$(env "${run[@]}" timeout -k 5 120 "$bin" "$s")
+        out=$(env "${run[@]}" timeout -k 5 120 "$bin" "$s" 2>&1)
         # an assertion (CHECK prints file:line), not an abort or a precondition
-        grep -E '^  FAIL .+\.[ch]:[0-9]+: ' <<<"$out" && { caught=1; echo "negative control $name: caught by $s at $rate Hz"; break; }
+        command grep -E '^  FAIL .+\.[ch]:[0-9]+: ' <<<"$out" && { caught=1; echo "negative control $name: caught by $s at $rate Hz"; break; }
     done
     ((caught)) || { echo "FAIL negative control $name: $list still pass at $rate Hz"; return 1; }
 }
@@ -310,11 +314,11 @@ neg_rate() {
     engine_harness scheduler "$OUT/bded" "$dir/sched" || { echo "FAIL build"; return 1; }
     out=$(HARNESS_RATE=60 timeout -k 5 60 "$dir/api3/harness" smoke)
     echo "$out"
-    grep -q 'game error: module does not export GMF_VARIABLE_FPS' <<<"$out" || { echo "FAIL api3 did not refuse 60 Hz"; rc=1; }
+    command grep -q 'game error: module does not export GMF_VARIABLE_FPS' <<<"$out" || { echo "FAIL api3 did not refuse 60 Hz"; rc=1; }
     out=$(SCHED_GAME="$dir/sched/testgame.so" SCHED_BASEDIR="$dir/sched/base" SCHED_RATE=60 \
         timeout -k 5 60 "$dir/sched/driver" t01_early_call)
     echo "$out"
-    grep -q 'precondition: server runs 10 Hz, requested 60 Hz' <<<"$out" || { echo "FAIL scheduler did not refuse 60 Hz"; rc=1; }
+    command grep -q 'precondition: server runs 10 Hz, requested 60 Hz' <<<"$out" || { echo "FAIL scheduler did not refuse 60 Hz"; rc=1; }
     return $rc
 }
 
@@ -374,7 +378,7 @@ fi
 echo
 echo "===== summary (q2pro $(git -C "$Q2PRO" rev-parse --short HEAD 2>/dev/null), openffa $(git -C "$OPENFFA" rev-parse --short HEAD 2>/dev/null), opentdm $(git -C "$OPENTDM" rev-parse --short HEAD 2>/dev/null); OUT=$OUT)"
 printf '%s\n' "${SUMMARY[@]}"
-printf '%s\n' "${SUMMARY[@]}" | grep -qv '^PASS' && exit 1
+printf '%s\n' "${SUMMARY[@]}" | command grep -qv '^PASS' && exit 1
 ((NEGATIVE)) || [[ $RATES == "$ALL_RATES" ]] || { echo "partial run, not green: RATES='$RATES'"; exit 3; }
 ((${#SKIPPED[@]})) && { echo "partial run, not green: --only '$ONLY' left out ${#SKIPPED[@]} stage(s)"; exit 3; }
 exit 0
