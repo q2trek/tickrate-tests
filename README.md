@@ -73,8 +73,12 @@ Running
     Q2_DATA=/path/to/quake2 ./run.sh ../q2pro ../openffa ../opentdm
 
 The three arguments are checkouts of the forks with `master` checked out and
-the upstream repository as the `origin` remote (in a clone of the fork, add it:
-`git remote add origin https://github.com/q2pro/q2pro.git`, and so on).
+the upstream repository as the `origin` remote. In a fresh clone of a fork
+`origin` is the fork itself, so rename it, then add and fetch the upstream:
+`git remote rename origin q2trek` and
+`git remote add -f origin https://github.com/q2pro/q2pro.git` (OpenFFA:
+`https://github.com/q2pro/openffa.git`, OpenTDM:
+`https://github.com/packetflinger/opentdm.git`).
 `UPSTREAM_REF` names another upstream ref (default `origin/master`). `RATES`
 limits the server rates (default `10 20 30 40 50 60`; any other list is a
 partial run), `Q2_MAP` picks the map (default `q2dm1`), `OUT` is where builds
