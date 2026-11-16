@@ -2730,9 +2730,9 @@ static void sc_t18_environment_resume(void)
     CHECK(tdm_match_status == MM_TIMEOUT, "timeout");
     a->waterlevel = 1;
     a->watertype = CONTENTS_LAVA;
-    int hp = h_hp(a), frozen = level.framenum;
+    int hp = h_hp_now(a), frozen = level.framenum;
     h_frames_n(h_div + 1);
-    CHECK(level.framenum == frozen && h_hp(a) == hp, "no world damage while paused");
+    CHECK(level.framenum == frozen && h_hp_now(a) == hp, "no world damage while paused");
     a->waterlevel = a->watertype = 0;
     h_client_command(a, "time");
     for (int i = 0; i < 15 * h_rate && tdm_match_status == MM_TIMEOUT; i++) h_frame();
@@ -2745,10 +2745,10 @@ static void sc_t18_environment_resume(void)
         for (int i = 0; i < h_rate; i++) {
             a->waterlevel = 1;
             a->watertype = liquid ? CONTENTS_SLIME : CONTENTS_LAVA;
-            int before = h_hp(a);
+            int before = h_hp_now(a);
             int want = level.realframenum % h_div == 0 ? (liquid ? 1 : 3) : 0;
             h_frame();
-            int damage = before - h_hp(a);
+            int damage = before - h_hp_now(a);
             total += damage;
             wrong += damage != want;
         }

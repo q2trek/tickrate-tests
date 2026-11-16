@@ -118,7 +118,7 @@ neg-opentdm-fixed-engine | opentdm/g_tdm_core.c | api3:box | 60 | t01_fixed_engi
 neg-opentdm-ghost | opentdm/g_tdm_cmds.c | api3:box | 60 | t17_ghost_ratelimit | s/TDM_RateLimited(ent, SECS_TO_FRAMES(0.2f))/TDM_RateLimited(ent, 2)/
 neg-opentdm-ping | opentdm/g_tdm_core.c | api3:box | 60 | t17_ping_handicap | s/tick = level.framenum \/ SECS_TO_FRAMES(0.1f);/tick = level.framenum;/
 neg-opentdm-feedback | opentdm/p_view.c | api3:box | 60 | t18_flash_window t18_blend_batches | /void P_DamageFeedback/,/^}/s/if (!FRAMESYNC)/if (0)/
-neg-opentdm-gun-sway | opentdm/p_view.c | api3:box | 60 | t18_gun_sway | /void SV_CalcGunOffset/,/^}/s/if (!FRAMESYNC)/if (0)/
+neg-opentdm-gun-sway | opentdm/p_view.c | api3:box | 60 | t18_gun_sway | /void SV_CalcGunOffset/,/^}/s/if (!FRAMESYNC)/if (0)/ | /void ClientEndServerFrame/,/^}/s/if (FRAMESYNC)/if (1)/
 neg-opentdm-bob-air | opentdm/p_view.c | api3:box | 60 | t18_bob_air | s/^        bobmove = 0;$/        bobmove = 0.0625f;/
 neg-opentdm-burn | opentdm/p_view.c | api3:box | 60 | t18_lava_sound | s/+ SECS_TO_FRAMES(1);/+ SECS_TO_FRAMES(0.1f);/
 neg-opentdm-pain | opentdm/p_view.c | api3:box | 60 | t18_fall_pain t18_drown_pain | s/+ SECS_TO_FRAMES(0.1f) - 1/ + 0/g
