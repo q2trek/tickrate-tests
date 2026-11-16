@@ -8,6 +8,7 @@
 #           client[:KIND[:U[:B]]] engine/client, peer KIND (new, legacy,
 #                                 oldsv), cl_updaterate U (default 0), engine
 #                                 build OUT/B (default bcl-fps)
+#           remote                engine/client/remote_lerp_test.c
 #           api3:box|engine       mods/api3 of the mod FILE belongs to
 # SCENARIOS * for the harness list, or names
 # SED       sed scripts applied in order; @master takes the file of upstream
@@ -111,3 +112,17 @@ neg-opentdm-ground-recheck | opentdm/g_main.c | api3:engine | 60 | * | s/\&\& tr
 neg-opentdm-rotating-ride | opentdm/g_func.c | api3:engine | 60 | t12_rotating_ride | /^\(static \)\{0,1\}void rotating_touch/,/^}/s/if (self->avelocity\[0\] || self->avelocity\[1\] || self->avelocity\[2\])/if (0)/
 neg-opentdm-carry-restart | opentdm/g_utils.c | api3:engine | 60 | t13_carry_map | s/^    memset(ed, 0, sizeof(\*ed));$/    { vec3_t k; VectorCopy(ed->push_carry, k); memset(ed, 0, sizeof(*ed)); VectorCopy(k, ed->push_carry); }/
 neg-opentdm-accel-final | opentdm/g_func.c | api3:engine | 60 | t14_plat | s/^        AccelMove_Final(ent);$/        Move_Final(ent);/
+
+# Real-time OpenTDM feedback and command timing (the old per-frame paths).
+neg-opentdm-fixed-engine | opentdm/g_tdm_core.c | api3:box | 60 | t01_fixed_engine | s/if ((game.server_features & GMF_VARIABLE_FPS) == 0) {/if (0) {/
+neg-opentdm-ghost | opentdm/g_tdm_cmds.c | api3:box | 60 | t17_ghost_ratelimit | s/TDM_RateLimited(ent, SECS_TO_FRAMES(0.2f))/TDM_RateLimited(ent, 2)/
+neg-opentdm-ping | opentdm/g_tdm_core.c | api3:box | 60 | t17_ping_handicap | s/tick = level.framenum \/ SECS_TO_FRAMES(0.1f);/tick = level.framenum;/
+neg-opentdm-feedback | opentdm/p_view.c | api3:box | 60 | t18_flash_window t18_blend_batches | /void P_DamageFeedback/,/^}/s/if (!FRAMESYNC)/if (0)/
+neg-opentdm-gun-sway | opentdm/p_view.c | api3:box | 60 | t18_gun_sway | /void SV_CalcGunOffset/,/^}/s/if (!FRAMESYNC)/if (0)/
+neg-opentdm-bob-air | opentdm/p_view.c | api3:box | 60 | t18_bob_air | s/^        bobmove = 0;$/        bobmove = 0.0625f;/
+neg-opentdm-burn | opentdm/p_view.c | api3:box | 60 | t18_lava_sound | s/+ SECS_TO_FRAMES(1);/+ SECS_TO_FRAMES(0.1f);/
+neg-opentdm-pain | opentdm/p_view.c | api3:box | 60 | t18_fall_pain t18_drown_pain | s/+ SECS_TO_FRAMES(0.1f) - 1/ + 0/g
+neg-opentdm-powerup-warning | opentdm/p_view.c | api3:box | 60 | t18_powerup_warn_timeout | s/qboolean warn = tdm_match_status != MM_TIMEOUT;/qboolean warn = true;/
+neg-opentdm-kick-clock | opentdm/p_view.c | api3:box | 60 | t18_kick_timeout | /void SV_CalcViewOffset/,/^}/s/if (FRAMESYNC)/if ((level.framenum % SECS_TO_FRAMES(0.1f)) == 0)/
+neg-opentdm-environment-clock | opentdm/p_view.c | api3:box | 60 | t18_environment_resume | /void P_WorldEffects/,/^}/s/if (FRAMESYNC)/if ((level.framenum % SECS_TO_FRAMES(0.1f)) == 0)/
+

@@ -1,5 +1,5 @@
 /*
- * T09-T15 against the mod module. Expected numbers are the
+ * T09-T18 against the mod module. Expected numbers are the
  * original 10 Hz contract (weapon frame tables, hurt/crush timestamps),
  * derived in the comments. Scenarios express it in game time (h_rate
  * ticks = 1 s, h_div ticks = one 100 ms weapon step), so they also run at
@@ -2458,6 +2458,334 @@ static void sc_t10_timeout_release_grenade(void) { h_timeout_fire(H_TO_RELEASE);
 static void sc_t10_timeout_hold_grenade(void) { h_timeout_fire(H_TO_HOLD); }
 #endif
 
+#ifdef HARNESS_OPENTDM
+/* A stale sv_fps cvar cannot enable a capability the engine does not have. */
+static void sc_t01_fixed_engine(void)
+{
+    h_scene_base();
+    h_start(h_ents);
+    game.server_features &= ~GMF_VARIABLE_FPS;
+    imp_cvar_set("sv_fps", "60");
+    TDM_SetFrameTime();
+    CHECK(SERVER_FPS == 10 && fabsf(FRAMETIME - 0.1f) < 1e-6f,
+          "fixed engine ignores sv_fps 60: 10 Hz, 0.1 s (got %d, %.6f)", SERVER_FPS, FRAMETIME);
+}
+#endif
+
+/* ---------------------------------------------------------------- T17 */
+
+#ifdef HARNESS_OPENTDM
+/* `ghost` (join code) is rate limited for 200 ms, as at 10 Hz: a second
+ * command in the same frame and one 100 ms later are ignored, one 200 ms
+ * after the first is processed */
+static void sc_t17_ghost_ratelimit(void)
+{
+    edict_t *a, *b;
+    h_tdm_pair(&a, &b);
+    edict_t *s = h_connect(2, "spec");      /* a spectator: ghost works only from spectator mode */
+    if (!h_tdm_start(a, b)) return;
+    static const struct { int frames; int limited; } at[] = { { 0, 0 }, { 0, 1 }, { 1, 1 }, { 2, 0 } };
+    int f0 = h_frames;
+    for (int k = 0; k < 4; k++) {
+        while (h_frames - f0 < at[k].frames * h_rate / 10) h_frame();
+        int tx = h_ntexts;
+        h_client_command(s, "ghost 12345");
+        int limited = h_text_to(s, 0, "rate limiting", tx) != NULL;
+        int done = h_text_to(s, 0, "No client information found", tx) != NULL;
+        CHECK(limited == at[k].limited && done == !at[k].limited, "ghost %d ms after the first: %s (got %s)",
+              at[k].frames * 100, at[k].limited ? "rate limited" : "processed",
+              limited ? "rate limited" : done ? "processed" : "nothing");
+    }
+}
+
+/* g_ping_handicap: the displayed ping jitters as at 10 Hz on every
+ * scoreboard refresh (3 s): +3 every 4th refresh, -2 two refreshes later,
+ * the plain value between */
+static void sc_t17_ping_handicap(void)
+{
+    h_set_override("g_ping_handicap", "50");
+    h_scene_base();
+    h_start(h_ents);
+    int stride = 3 * h_rate;
+    for (int n = 0; n < 8;) {
+        h_frame();
+        if (level.framenum % stride) continue;
+        int k = level.framenum / stride, want = k % 4 == 0 ? 53 : k % 4 == 2 ? 48 : 50;
+        int got = TDM_PingHandicap(0);
+        CHECK(got == want, "refresh %d (frame %d): handicap ping %d (got %d)", k, level.framenum, want, got);
+        n++;
+    }
+}
+#endif
+
+/* ---------------------------------------------------------------- T18 */
+
+/* Player presentation (p_view.c) at the 10 Hz contract: feedback that
+ * stock Q2 computes once per world frame is computed once per 100 ms at
+ * any rate, on the real frame counter (it keeps running in a timeout).
+ * The world is driven with bare h_frame() where the box Pmove would reset
+ * the field under test (ground, water level, view angles). */
+#ifdef HARNESS_OPENTDM
+/* idle frames until the next frame has real frame phase k of the 100 ms
+ * window (ClientEndServerFrame sees realframenum before its increment) */
+static void h_real_phase(int k)
+{
+    while (level.realframenum % h_div != k) h_frame();
+}
+
+static void h_hit(edict_t *p, int damage)
+{
+    vec3_t dir = { 0, 0, 0 };
+    T_Damage(p, g_edicts, g_edicts, dir, p->s.origin, dir, damage, 0, 0, MOD_TRIGGER_HURT);
+}
+
+/* One hit, in every phase of the window: the HUD flash lasts one 100 ms
+ * window (h_div frames), not one world frame. */
+static void sc_t18_flash_window(void)
+{
+    h_scene_base();
+    h_start(h_ents);
+    edict_t *p = h_join(0, "p1");
+    for (int k = 0; k < h_div; k++) {
+        h_give(p, "health", 100);
+        h_frames_n(h_rate);
+        h_real_phase(k);
+        h_hit(p, 10);
+        int n = 0;
+        for (int i = 0; i < 3 * h_div; i++) {
+            h_frame();
+            n += h_stat(p, STAT_FLASHES) != 0;
+        }
+        CHECK(n == h_div, "hit in phase %d/%d: flash for %d frames (got %d)", k, h_div, h_div, n);
+    }
+}
+
+/* Six 1-point hits inside one 100 ms window (all in one frame at 10 Hz,
+ * spread over the window's frames at 60): one feedback batch, the blend
+ * peaks at the 10 Hz value 0.2 (the minimum visible alpha). */
+static void sc_t18_blend_batches(void)
+{
+    h_scene_base();
+    h_start(h_ents);
+    edict_t *p = h_join(0, "p1");
+    h_frames_n(h_rate);
+    h_real_phase(1 % h_div);    /* the window ends with the last hit's frame */
+    float peak = 0;
+    for (int f = 0, i = 0; f < 3 * h_div; f++) {
+        for (; i < 6 && i * h_div / 6 == f; i++) h_hit(p, 1);
+        h_frame();
+        if (p->client->ps.blend[3] > peak) peak = p->client->ps.blend[3];
+    }
+    CHECK(fabsf(peak - 0.2f) < 0.01f, "six hits in one window: peak blend alpha 0.2 (got %.3f)", peak);
+}
+
+/* Turning at 90 deg/s for 0.5 s: the gun lags by 0.2 of the view turn of
+ * one 100 ms window, 0.2 * 9 = 1.8 deg yaw, at any rate. */
+static void sc_t18_gun_sway(void)
+{
+    h_scene_base();
+    h_start(h_ents);
+    edict_t *p = h_join(0, "p1");
+    h_frames_n(h_rate);
+    float yaw = p->client->ps.viewangles[YAW], peak = 0;
+    for (int i = 0; i < h_rate / 2; i++) {
+        yaw += 90.0f / h_rate;
+        p->client->ps.viewangles[YAW] = p->client->v_angle[YAW] = yaw;
+        h_frame();
+        if (fabsf(p->client->ps.gunangles[YAW]) > peak) peak = fabsf(p->client->ps.gunangles[YAW]);
+    }
+    CHECK(fabsf(peak - 1.8f) < 0.05f, "turning 90 deg/s: peak gun yaw 1.8 (got %.3f)", peak);
+}
+
+/* Running, then airborne for 0.5 s: the bob cycle stops in the air. */
+static void sc_t18_bob_air(void)
+{
+    h_scene_base();
+    h_start(h_ents);
+    edict_t *p = h_join(0, "p1");
+    VectorSet(p->velocity, 300, 0, 0);
+    h_frames_n(h_rate / 2);
+    float run = p->client->bobtime;
+    CHECK(run > 0, "running: the bob cycle advances (bobtime %.3f)", run);
+    p->groundentity = NULL;
+    h_frame();
+    float air = p->client->bobtime;
+    for (int i = 0; i < h_rate / 2; i++) {
+        p->groundentity = NULL;
+        h_frame();
+    }
+    CHECK(air == run && p->client->bobtime == run, "airborne: bobtime stays %.4f (got %.4f, then %.4f)",
+          run, air, p->client->bobtime);
+}
+
+/* In lava for 2 s: one burn sound per second (the 1 s debounce follows
+ * both burn sounds), whatever burn1/burn2 the dice pick. */
+static void sc_t18_lava_sound(void)
+{
+    h_scene_base();
+    h_start(h_ents);
+    edict_t *p = h_join(0, "p1");
+    h_frames_n(h_rate);
+    int s = h_nsounds;
+    for (int i = 0; i < 2 * h_rate; i++) {
+        p->waterlevel = 1;
+        p->watertype = CONTENTS_LAVA;
+        h_frame();
+    }
+    int b1 = h_find(h_sounds, "player/burn1.wav"), b2 = h_find(h_sounds, "player/burn2.wav");
+    int burns = (b1 > 0 ? h_count_sounds(b1, s) : 0) + (b2 > 0 ? h_count_sounds(b2, s) : 0);
+    CHECK(p->health > 0, "alive in lava (health %d)", p->health);
+    CHECK(burns == 2, "2 s in lava: 2 burn sounds (got %d)", burns);
+}
+
+/* sound calls since log index `from` whose name starts with `prefix` */
+static int h_count_prefix(const char *prefix, int from)
+{
+    int c = 0;
+    for (int i = from; i < h_nsounds; i++) {
+        const char *n = h_sounds[h_sounds_log[i].soundindex];
+        c += n && !strncmp(n, prefix, strlen(prefix));
+    }
+    return c;
+}
+
+/* A hard landing (fall damage), in every phase of the window: the fall
+ * sound, and no normal pain sound with it (the feedback of its window). */
+static void sc_t18_fall_pain(void)
+{
+    h_scene_base();
+    h_start(h_ents);
+    edict_t *p = h_join(0, "p1");
+    for (int k = 0; k < h_div; k++) {
+        h_give(p, "health", 100);
+        h_frames_n(h_rate);
+        h_real_phase(k);
+        int s = h_nsounds, hp = h_hp(p);
+        p->velocity[2] = -600;      /* landed: delta 600, 36 > 30 */
+        h_frames_n(2 * h_div);
+        VectorClear(p->velocity);
+        VectorClear(p->client->oldvelocity);
+        int fall = h_count_prefix("*fall", s), pain = h_count_prefix("*pain", s);
+        CHECK(h_hp(p) < hp && fall == 1, "phase %d/%d: fall damage and its sound (health+armor %d -> %d, %d sounds)",
+              k, h_div, hp, h_hp(p), fall);
+        CHECK(pain == 0, "phase %d/%d: no pain sound with the fall (got %d)", k, h_div, pain);
+    }
+}
+
+/* Drowning for 4 s past the 12 s of air: a gurp sound with each hit, no
+ * normal pain sound with them. */
+static void sc_t18_drown_pain(void)
+{
+    h_scene_base();
+    h_start(h_ents);
+    edict_t *p = h_join(0, "p1");
+    h_frames_n(h_rate);
+    int s = h_nsounds;
+    for (int i = 0; i < 16 * h_rate; i++) {
+        p->waterlevel = 3;
+        p->watertype = CONTENTS_WATER;
+        h_frame();
+    }
+    int gurp = h_count_prefix("*gurp", s), pain = h_count_prefix("*pain", s);
+    CHECK(gurp >= 3, "drowning: gurp sounds (got %d)", gurp);
+    CHECK(pain == 0, "drowning: no pain sound (got %d)", pain);
+}
+
+/* Quad with exactly 3 s left when a timeout starts: the fade warning is
+ * not repeated through the pause (frozen game clock), it sounds once,
+ * when the clock runs again. */
+static void sc_t18_powerup_warn_timeout(void)
+{
+    edict_t *a, *b;
+    h_tdm_pair(&a, &b);
+    if (!h_tdm_start(a, b)) return;
+    h_give(a, "quad damage", 0);
+    h_client_command(a, "use quad damage");
+    h_frame();
+    CHECK(a->s.effects & EF_QUAD, "quad active");
+    while (a->client->quad_framenum - level.framenum > 3 * h_rate) h_frame();
+    int s = h_nsounds;
+    h_client_command(a, "time");
+    CHECK(tdm_match_status == MM_TIMEOUT, "timeout (status %d)", tdm_match_status);
+    h_frames_n(h_rate);
+    int w = h_find(h_sounds, "items/damage2.wav"), paused = w > 0 ? h_count_sounds(w, s) : 0;
+    h_client_command(a, "time");
+    for (int i = 0; i < 15 * h_rate && tdm_match_status == MM_TIMEOUT; i++) h_frame();
+    CHECK(tdm_match_status == MM_PLAYING, "resumed (status %d)", tdm_match_status);
+    h_frames_n(h_rate);
+    w = h_find(h_sounds, "items/damage2.wav");
+    int total = w > 0 ? h_count_sounds(w, s) : 0;
+    CHECK(paused <= 1, "1 s of timeout at 3 s left: at most one warning (got %d)", paused);
+    CHECK(total == 1, "through the timeout and 1 s after: one warning (got %d)", total);
+}
+
+/* After a timeout the real and game frame phases can differ. Environment
+ * damage resumes on the real 100 ms grid, and stays off during the pause. */
+static void sc_t18_environment_resume(void)
+{
+    edict_t *a, *b;
+    h_tdm_pair(&a, &b);
+    if (!h_tdm_start(a, b)) return;
+    h_client_command(a, "time");
+    CHECK(tdm_match_status == MM_TIMEOUT, "timeout");
+    a->waterlevel = 1;
+    a->watertype = CONTENTS_LAVA;
+    int hp = h_hp(a), frozen = level.framenum;
+    h_frames_n(h_div + 1);
+    CHECK(level.framenum == frozen && h_hp(a) == hp, "no world damage while paused");
+    a->waterlevel = a->watertype = 0;
+    h_client_command(a, "time");
+    for (int i = 0; i < 15 * h_rate && tdm_match_status == MM_TIMEOUT; i++) h_frame();
+    CHECK(tdm_match_status == MM_PLAYING, "resumed");
+    if (h_div > 1)
+        CHECK(level.framenum % h_div != level.realframenum % h_div, "game and real phases differ");
+    for (int liquid = 0; liquid < 2; liquid++) {
+        h_give(a, "health", 100);
+        int total = 0, wrong = 0;
+        for (int i = 0; i < h_rate; i++) {
+            a->waterlevel = 1;
+            a->watertype = liquid ? CONTENTS_SLIME : CONTENTS_LAVA;
+            int before = h_hp(a);
+            int want = level.realframenum % h_div == 0 ? (liquid ? 1 : 3) : 0;
+            h_frame();
+            int damage = before - h_hp(a);
+            total += damage;
+            wrong += damage != want;
+        }
+        CHECK(!wrong && total == (liquid ? 10 : 30),
+              "%s damage on real grid (%d wrong frames, total %d)",
+              liquid ? "slime" : "lava", wrong, total);
+    }
+}
+
+/* A rocket kick shown on a 100 ms window, then a timeout freezes the game
+ * clock on the next frame (not a window start at 60 Hz): the view kick
+ * still returns to zero within 0.2 s of real frames. */
+static void sc_t18_kick_timeout(void)
+{
+    edict_t *a, *b;
+    h_tdm_pair(&a, &b);
+    if (!h_tdm_start(a, b)) return;
+    a->flags |= FL_GODMODE;
+    b->flags |= FL_GODMODE;
+    h_give(a, "rocket launcher", 0);
+    h_give(a, "rockets", 10);
+    h_use(a, "rocket launcher");
+    h_tick(a, BUTTON_ATTACK, 1);
+    for (int i = 0; i < 3 * h_div && !a->client->ps.kick_angles[PITCH]; i++) h_tick(a, 0, 1);
+    CHECK(a->client->ps.kick_angles[PITCH] != 0, "rocket: view kick shown (%.2f)", a->client->ps.kick_angles[PITCH]);
+    h_client_command(a, "time");
+    CHECK(tdm_match_status == MM_TIMEOUT, "timeout (status %d)", tdm_match_status);
+    int zero = -1;
+    for (int i = 0; i < 2 * h_div && zero < 0; i++) {
+        h_frame();
+        if (VectorCompare(a->client->ps.kick_angles, vec3_origin)) zero = i;
+    }
+    CHECK(zero >= 0, "timeout: view kick back to zero within 0.2 s (still %.2f %.2f %.2f)",
+          a->client->ps.kick_angles[0], a->client->ps.kick_angles[1], a->client->ps.kick_angles[2]);
+}
+#endif
+
 static const struct { const char *name; void (*run)(void); } h_scenarios[] = {
     { "smoke", sc_smoke },
     { "t01_rate_refuse", sc_t01_rate_refuse },
@@ -2542,6 +2870,19 @@ static const struct { const char *name; void (*run)(void); } h_scenarios[] = {
     { "t15_match_hud", sc_t15_match_hud },
     { "t15_timeout_hud", sc_t15_timeout_hud },
     { "t15_players_time", sc_t15_players_time },
+    { "t01_fixed_engine", sc_t01_fixed_engine },
+    { "t18_environment_resume", sc_t18_environment_resume },
+    { "t17_ghost_ratelimit", sc_t17_ghost_ratelimit },
+    { "t17_ping_handicap", sc_t17_ping_handicap },
+    { "t18_flash_window", sc_t18_flash_window },
+    { "t18_blend_batches", sc_t18_blend_batches },
+    { "t18_gun_sway", sc_t18_gun_sway },
+    { "t18_bob_air", sc_t18_bob_air },
+    { "t18_lava_sound", sc_t18_lava_sound },
+    { "t18_fall_pain", sc_t18_fall_pain },
+    { "t18_drown_pain", sc_t18_drown_pain },
+    { "t18_powerup_warn_timeout", sc_t18_powerup_warn_timeout },
+    { "t18_kick_timeout", sc_t18_kick_timeout },
     { "t09_timeout_release_mg", sc_t09_timeout_release_mg },
     { "t10_timeout_release_grenade", sc_t10_timeout_release_grenade },
     { "t10_timeout_hold_grenade", sc_t10_timeout_hold_grenade },
