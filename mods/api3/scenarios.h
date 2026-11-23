@@ -1298,8 +1298,13 @@ static void sc_t12_falling_object_moving(void)
     edict_t *p = h_falling_object_scene();
     static int hits[H_MAXTICKS];
     h_damage_run(p, 5 * h_rate, 0, hits);
+    if (h_div > 1) {
+        while (!FRAMESYNC) h_frame();
+        h_frame();  /* The first relink must be checked outside a keyframe. */
+    }
+    h_place(p, 1, 1000, 24);
     int t0 = h_damage_run(p, 2 * h_rate, 1, hits);
-    CHECK(t0 >= 0 && t0 <= 1, "object re-impacts a player sending usercmds at once (tick %d)", t0);
+    CHECK(t0 == 0, "object re-impacts the player on the first relink (tick %d)", t0);
     if (t0 < 0) return;
     CHECK(h_sum(hits, t0, t0 + h_rate) == 10, "player sending usercmds: 10 hits in [t0, t0 + 1 s) (got %d)",
           h_sum(hits, t0, t0 + h_rate));

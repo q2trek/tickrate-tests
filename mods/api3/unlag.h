@@ -374,6 +374,7 @@ static void hu_rail_overlap(bool both_historical)
 {
     hu_scene(4);
     h_start(h_ents);
+    hu_srand(1);
     edict_t *shooter = hu_join_shooter();
     edict_t *a = hu_join(1, "first");
     hu_position(a, 128, -64, 24);

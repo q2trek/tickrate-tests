@@ -57,7 +57,7 @@ neg-openffa-knockback-dir | openffa/g_combat.c | api3:box | 10 | t11_knockback_z
 neg-openffa-bfg-backoff | openffa/g_weapon.c | api3:box | 60 | t11_bfg_wall | s/VectorMA(self->s.origin, -0.1f, self->velocity, self->s.origin);/VectorMA(self->s.origin, -1 * FRAMETIME, self->velocity, self->s.origin);/
 neg-openffa-viper-roll | openffa/g_misc.c | api3:engine | 60 | t13_viper_bomb_roll | s/= diff + 100.0f \* FRAMETIME;/= diff + 10;/
 neg-openffa-crush-free | openffa/g_utils.c | api3:box | 10 | * | s/^            level.crush\[i\].framenum = 0;$/            (void)0;/
-neg-openffa-crush-limit | openffa/g_utils.c | api3:box | 60 | t12_door_crusher t12_crush_phases | s/level.framenum + (int)(0.1f \* HZ);/level.framenum + 1;/
+neg-openffa-crush-limit | openffa/g_utils.c | api3:box | 60 | t12_door_crusher t12_crush_phases t12_falling_object_moving | s/level.framenum + (int)(0.1f \* HZ);/level.framenum + 1;/
 # a level reset restarts the frame counter: a stale overflow cooldown blocks the client
 neg-openffa-crush-reset | openffa/g_spawn.c | api3:box | 60 | t12_crush_overflow | s/^        ent->crush_framenum = 0;.*$/        (void)0;/
 # a func_object resting on a player sending usercmds hits once per world frame
@@ -93,7 +93,7 @@ neg-opentdm-bfg-first-laser | opentdm/g_weapon.c | api3:box | 60 | t11_bfg_wall 
 neg-opentdm-viper-roll | opentdm/g_misc.c | api3:engine | 60 | t13_viper_bomb_roll | s/= diff + 100.0f \* FRAMETIME;/= diff + 10;/
 neg-opentdm-pending-resume | opentdm/g_tdm_core.c | api3:box | 60 | t09_lifecycle_timeout | s/^                ent->client->attack_pending = false;$/                (void)0;/
 neg-opentdm-crush-free | opentdm/g_utils.c | api3:box | 10 | * | s/^            level.crush\[i\].framenum = 0;$/            (void)0;/
-neg-opentdm-crush-limit | opentdm/g_utils.c | api3:box | 60 | t12_door_crusher t12_crush_phases | s/level.framenum + SECS_TO_FRAMES(0.1f);/level.framenum + 1;/
+neg-opentdm-crush-limit | opentdm/g_utils.c | api3:box | 60 | t12_door_crusher t12_crush_phases t12_falling_object_moving | s/level.framenum + SECS_TO_FRAMES(0.1f);/level.framenum + 1;/
 neg-opentdm-rate-zero | opentdm/g_tdm_core.c | api3:box | 60 | t01_rate_zero | s/SERVER_FPS < 10 || //
 neg-opentdm-object-crush | opentdm/g_misc.c | api3:box | 60 | t12_falling_object_moving | s/^    if (G_CrushAllowed(self, other)) {$/    if (1) {/
 neg-opentdm-hud-ceil | opentdm/g_tdm_core.c | api3:box | 60 | t15_countdown_hud t15_match_hud | s/^        secs = (time_remaining + SERVER_FPS - 1) \/ SERVER_FPS;$/        secs = ceil((float) time_remaining * FRAMETIME);/
