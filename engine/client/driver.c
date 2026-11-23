@@ -43,6 +43,8 @@
 #include "src/server/server.h"
 
 
+#include "shared/unlag.h"
+
 int q2pro_real_main(int argc, char **argv);
 
 static int h_failures;
@@ -281,8 +283,21 @@ static void h_delay_release(void)
     h_dq_n--;
 }
 
+static bool h_pacing_manual, h_pacing_send, h_pacing_protocol34;
+static bool h_pacing_pin_origin;
+static byte h_pacing_packet[MAX_PACKETLEN];
+static size_t h_pacing_len;
+
 bool __wrap_NET_SendPacket(netsrc_t sock, const void *data, size_t len, const netadr_t *to)
 {
+    if (sock == NS_CLIENT && to->type == NA_LOOPBACK && h_pacing_manual) {
+        if (!h_pacing_send)
+            return true;
+        Q_assert(len <= sizeof(h_pacing_packet));
+        memcpy(h_pacing_packet, data, len);
+        h_pacing_len = len;
+    }
+
     if (sock == NS_CLIENT && to->type == NA_LOOPBACK && (h_delay || h_dq_n)) {
         h_delay_push(data, len, to);
         return true;
@@ -455,7 +470,47 @@ void h_game_command(game_import_t *gi, edict_t *ent)
     gi->AddCommandString(va("h_ack\n%s\n", gi->args()));
 }
 
-void h_game_think(edict_t *ent) { (void)ent; h_thinks++; }
+static usercmd_t h_think_cmds[512];
+void h_game_think(edict_t *ent, usercmd_t *cmd)
+{
+    h_think_cmds[h_thinks++ & 511] = *cmd;
+    if (h_pacing_manual) {
+        gclient_new_t *c = ent->client;
+        c->ps.pmove.velocity[0] = cmd->forwardmove;
+        c->ps.pmove.origin[0] += cmd->forwardmove ? cmd->msec : 0;
+    }
+}
+
+static bool h_unlag_observe;
+static int h_unlag_world, h_unlag_rate, h_unlag_outside_bad;
+static unlag_command_t h_unlag_seen[q_countof(h_think_cmds)];
+static int h_unlag_slots[q_countof(h_think_cmds)];
+static void (*h_unlag_nested)(const unlag_api_v1_t *, edict_t *, edict_t *);
+
+void h_game_unlag(const unlag_api_v1_t *api)
+{
+    if (!h_unlag_observe || !api)
+        return;
+    h_unlag_world = api->WorldFrame();
+    h_unlag_rate = api->FrameRate();
+    h_unlag_outside_bad += api->Command(EDICT_NUM(1)).kind != UNLAG_OUTSIDE;
+}
+
+void h_game_unlag_think(const unlag_api_v1_t *api, edict_t *ent, edict_t *other)
+{
+    if (!h_unlag_observe)
+        return;
+    unlag_command_t context = { 0 };
+    if (api) {
+        h_unlag_outside_bad += api->Command(other).kind != UNLAG_OUTSIDE;
+        context = api->Command(ent);
+    }
+    h_unlag_seen[(h_thinks - 1) & 511] = context;
+    h_unlag_slots[(h_thinks - 1) & 511] = ent->s.number - 1;
+    if (api && h_unlag_nested)
+        h_unlag_nested(api, ent, other);
+}
+
 
 static void h_ack_f(void) { h_pending = 0; }
 
@@ -480,7 +535,7 @@ void h_game_runframe(game_import_t *gi, edict_t *edicts, int frame)
     }
     gi->linkentity(e);
     gclient_new_t *c = (gclient_new_t *)edicts[1].client;
-    if (c)
+    if (c && !h_pacing_manual && !h_pacing_pin_origin)
         c->ps.pmove.origin[0] = (frame % 400) * 8;
 }
 
@@ -594,6 +649,12 @@ static void h_cmd(const char *text)
     Cbuf_AddText(&cmd_buffer, "\n");
 }
 
+static void h_exec(const char *text)
+{
+    h_cmd(text);
+    Cbuf_Execute(&cmd_buffer);
+}
+
 static int h_want_div(void) { return h_expect_rate(h_update) / BASE_FRAMERATE; }
 
 static bool h_wait_active(int max_ms)
@@ -630,6 +691,7 @@ static void h_init(void)
         // players are PM_FREEZE (not captured): keep MVD streams unsuspended
         "+set", "sv_mvd_suspend_time", "0", "+set", "cl_updaterate", update,
         "+set", "name", getenv("CL_NAME") ? getenv("CL_NAME") : "h_client");
+    if (h_pacing_protocol34) ARG("+set", "cl_protocol", "34");
     if (connect) {
         /* the paks are local; qport from the fleet (the default is the start
          * time, the same for processes started together) */
@@ -1768,7 +1830,29 @@ static void t06_packetdup_loopback(void)
 }
 
 typedef struct { const char *name; void (*run)(void); int rated_only, kinds; } scenario_t;
+#include "pacing.h"
+#include "shot-time.h"
+
 static const scenario_t h_scenarios[] = {
+    { "pacing_single_pause", pacing_single_pause },
+    { "pacing_window_boundary", pacing_window_boundary },
+    { "pacing_unfinished_silence", pacing_unfinished_silence },
+    { "pacing_batch_exclusions", pacing_batch_exclusions },
+    { "pacing_duplicate_datagram", pacing_duplicate_datagram },
+    { "pacing_batch_five", pacing_batch_five },
+    { "pacing_reconnect", pacing_reconnect },
+    { "pacing_new_map", pacing_new_map },
+    { "pacing_host_hitch", pacing_host_hitch },
+    { "shot_time_estimate", shot_time_estimate, 0, 0 },
+    { "shot_time_ack_window", shot_time_ack_window, 0, 0 },
+    { "shot_time_commands", shot_time_commands, 0, 0 },
+    { "shot_time_empty_new_group", shot_time_empty_new_group, 0, 0 },
+    { "shot_time_rejected_backup", shot_time_rejected_backup, 0, 0 },
+    { "shot_time_nested_think", shot_time_nested_think, 0, 0 },
+    { "shot_time_rate_change", shot_time_rate_change, 0, 0 },
+    { "shot_time_lifecycle", shot_time_lifecycle, 0, 0 },
+    { "shot_time_channel_reset", shot_time_channel_reset, 0, 0 },
+    { "shot_time_non_network", shot_time_non_network, 0, 0 },
     { "t02_timeline", t02_timeline, 0, K_NEW },
     { "t02_nolerp", t02_nolerp, 0, K_NEW },
     { "t07_parser", t07_parser, 0, K_NEW },

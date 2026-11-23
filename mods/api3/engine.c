@@ -33,6 +33,7 @@ static uint16_t he_leafbrushes[HE_MAX];
 static int he_nplanes, he_nnodes, he_nleafs, he_nleafbrushes;
 
 static const hebox_t *he_boxes;     /* brushes of the model being built */
+static int he_contents[256];       /* contents by BSP brush number */
 static int he_brush0;               /* index of its first brush */
 
 static int he_plane(int axis, float dist, float sign)
@@ -44,12 +45,12 @@ static int he_plane(int axis, float dist, float sign)
     return he_nplanes++;
 }
 
-static int he_leaf(int contents, const int *ids, int n)
+static int he_leaf(int contents, const int *ids, int n, int cluster)
 {
     if (he_nleafs >= HE_MAX || he_nleafbrushes + n > HE_MAX) Com_Error(ERR_FATAL, "harness bsp: too many leafs");
     he_leafs[he_nleafs].contents = contents;
-    he_leafs[he_nleafs].cluster = contents ? 0xffff : 0;
-    he_leafs[he_nleafs].area = contents ? 0 : 1;
+    he_leafs[he_nleafs].cluster = contents & CONTENTS_SOLID ? 0xffff : cluster;
+    he_leafs[he_nleafs].area = contents & CONTENTS_SOLID ? 0 : 1;
     he_leafs[he_nleafs].firstbrush = he_nleafbrushes;
     he_leafs[he_nleafs].numbrushes = n;
     for (int i = 0; i < n; i++) he_leafbrushes[he_nleafbrushes++] = he_brush0 + ids[i];
@@ -59,7 +60,7 @@ static int he_leaf(int contents, const int *ids, int n)
 /* region [lo, hi] with the boxes `ids` that may overlap it: split on a box
  * face strictly inside the region; no such face left means every overlapping
  * box covers the whole region (solid leaf) or none overlaps (empty leaf) */
-static int he_build(const float lo[3], const float hi[3], const int *ids, int n)
+static int he_build(const float lo[3], const float hi[3], const int *ids, int n, int cluster)
 {
     int in[256], m = 0;
     for (int i = 0; i < n; i++) {
@@ -80,13 +81,16 @@ static int he_build(const float lo[3], const float hi[3], const int *ids, int n)
                 float flo[3], bhi[3];
                 VectorCopy(lo, flo); flo[a] = d;
                 VectorCopy(hi, bhi); bhi[a] = d;
-                he_nodes[node].children[0] = he_build(flo, hi, in, m);     /* front: x[a] >= d */
-                he_nodes[node].children[1] = he_build(lo, bhi, in, m);
+                he_nodes[node].children[0] = he_build(flo, hi, in, m, cluster);     /* front: x[a] >= d */
+                he_nodes[node].children[1] = he_build(lo, bhi, in, m, cluster);
                 return node;
             }
         }
     }
-    return he_leaf(m ? CONTENTS_SOLID : 0, in, m);
+    int contents = 0;
+    for (int i = 0; i < m; i++)
+        contents |= he_contents[he_brush0 + in[i]];
+    return he_leaf(contents, in, m, cluster);
 }
 
 static void he_put(FILE *f, const void *p, size_t n)
@@ -110,20 +114,26 @@ static void he_cleanup(void)
 }
 
 /* model 0: world boxes; model k (1..ninline): inline[k] */
-static void he_write_bsp(const hebox_t *world, int nworld, const hebox_t *inl, int ninline)
+static void he_write_bsp(const hebox_t *world, int nworld, const hebox_t *inl, int ninline,
+                         const int *world_contents, bool split_vis)
 {
     static hebox_t brushes[256];
     static struct { float mins[3], maxs[3]; int headnode; } models[64];
     int nbrushes = 0, ids[256];
 
-    he_leaf(CONTENTS_SOLID, NULL, 0);      /* leaf 0: the solid leaf */
+    he_leaf(CONTENTS_SOLID, NULL, 0, 0);      /* leaf 0: the solid leaf */
     for (int k = 0; k <= ninline; k++) {
         const hebox_t *src = k ? &inl[k] : world;
         int n = k ? 1 : nworld;
         float lo[3], hi[3];
         he_boxes = brushes + nbrushes;
         he_brush0 = nbrushes;
-        for (int i = 0; i < n; i++) { brushes[nbrushes++] = src[i]; ids[i] = i; }
+        for (int i = 0; i < n; i++) {
+            int contents = !k && world_contents ? world_contents[i] : 0;
+            he_contents[nbrushes] = contents ? contents : CONTENTS_SOLID;
+            brushes[nbrushes++] = src[i];
+            ids[i] = i;
+        }
         for (int a = 0; a < 3; a++) {
             lo[a] = n ? src[0].lo[a] : -1;
             hi[a] = n ? src[0].hi[a] : 1;
@@ -133,7 +143,18 @@ static void he_write_bsp(const hebox_t *world, int nworld, const hebox_t *inl, i
             lo[a] -= 64; hi[a] += 64;      /* the tree region: a margin of empty space */
         }
         int first = he_nnodes;
-        models[k].headnode = he_build(lo, hi, ids, n);
+        if (!k && split_vis) {
+            float upper[3], lower[3];
+            VectorCopy(lo, upper);
+            VectorCopy(hi, lower);
+            upper[1] = lower[1] = 0;
+            models[k].headnode = he_nnodes++;
+            he_nodes[0].planenum = he_plane(1, 0, 1);
+            he_nodes[0].children[0] = he_build(upper, hi, ids, n, 1);
+            he_nodes[0].children[1] = he_build(lo, lower, ids, n, 0);
+        } else {
+            models[k].headnode = he_build(lo, hi, ids, n, 0);
+        }
         if (k == 0 && (models[0].headnode != 0 || first != 0))
             Com_Error(ERR_FATAL, "harness bsp: world without a node");
     }
@@ -164,8 +185,18 @@ static void he_write_bsp(const hebox_t *world, int nworld, const hebox_t *inl, i
         he_i32(f, 0);       /* type: recomputed by the loader */
     }
     END(1);
-    /* visibility: one cluster that sees itself */
-    LUMP(3); he_i32(f, 1); he_i32(f, 12); he_i32(f, 12); he_put(f, (const byte[]){ 0xff }, 1); END(3);
+    /* Each cluster sees and hears itself. */
+    LUMP(3);
+    int clusters = split_vis ? 2 : 1;
+    he_i32(f, clusters);
+    for (int i = 0; i < clusters; i++) {
+        int offset = 4 + 8 * clusters + i;
+        he_i32(f, offset);
+        he_i32(f, offset);
+    }
+    for (int i = 0; i < clusters; i++)
+        he_put(f, (const byte[]){ split_vis ? BIT(i) : 0xff }, 1);
+    END(3);
     LUMP(4);
     for (int i = 0; i < he_nnodes; i++) {
         he_i32(f, he_nodes[i].planenum);
@@ -194,7 +225,7 @@ static void he_write_bsp(const hebox_t *world, int nworld, const hebox_t *inl, i
         he_i32(f, 0); he_i32(f, 0);
     }
     END(13);
-    LUMP(14); for (int i = 0; i < nbrushes; i++) { he_i32(f, 6 * i); he_i32(f, 6); he_i32(f, CONTENTS_SOLID); } END(14);
+    LUMP(14); for (int i = 0; i < nbrushes; i++) { he_i32(f, 6 * i); he_i32(f, 6); he_i32(f, he_contents[i]); } END(14);
     LUMP(15); for (int i = 0; i < 6 * nbrushes; i++) { he_i16(f, sides[i]); he_i16(f, -1); } END(15);
     LUMP(17); for (int i = 0; i < 2; i++) { he_i32(f, 0); he_i32(f, 0); } END(17);
 #undef LUMP
@@ -209,7 +240,7 @@ static void he_write_bsp(const hebox_t *world, int nworld, const hebox_t *inl, i
 /* ------------------------------------------------------------- interface */
 
 void he_init(void);
-void he_load_map(const float *world, int nworld, const float *inl, int ninline);
+void he_load_map(const float *world, int nworld, const float *inl, int ninline, const int *contents, int split_vis);
 void he_set_game(void *exports);
 void he_inline_bounds(const char *name, float *mins, float *maxs);
 trace_t he_trace(const vec3_t start, const vec3_t mins, const vec3_t maxs, const vec3_t end, edict_t *pass, int mask);
@@ -218,6 +249,9 @@ int he_boxedicts(const vec3_t mins, const vec3_t maxs, edict_t **list, int maxco
 void he_link(edict_t *ent);
 void he_unlink(edict_t *ent);
 void he_pmove(void *pm);
+uint32_t he_multicast(const vec3_t origin, multicast_t mode, const byte *data, size_t len, int maxclients);
+trace_t q_gameabi he_clip(const vec3_t start, const vec3_t mins, const vec3_t maxs,
+                        const vec3_t end, edict_t *ent, int mask);
 
 void he_init(void)
 {
@@ -247,9 +281,11 @@ void he_init(void)
     PmoveInit(&svs.pmp);
 }
 
-void he_load_map(const float *world, int nworld, const float *inl, int ninline)
+void he_load_map(const float *world, int nworld, const float *inl, int ninline, const int *contents, int split_vis)
 {
-    he_write_bsp((const hebox_t *)world, nworld, (const hebox_t *)inl, ninline);
+    CM_FreeMap(&sv.cm);
+    he_nplanes = he_nnodes = he_nleafs = he_nleafbrushes = 0;
+    he_write_bsp((const hebox_t *)world, nworld, (const hebox_t *)inl, ninline, contents, split_vis);
     int ret = CM_LoadMap(&sv.cm, "maps/harness.bsp");
     if (ret) Com_Error(ERR_FATAL, "harness: CM_LoadMap: %s", BSP_ErrorString(ret));
     if (sv.cm.cache->nummodels != ninline + 1) Com_Error(ERR_FATAL, "harness: %d models", sv.cm.cache->nummodels);
@@ -282,3 +318,40 @@ int he_boxedicts(const vec3_t mins, const vec3_t maxs, edict_t **list, int maxco
 void he_link(edict_t *ent) { PF_LinkEdict(ent); }
 void he_unlink(edict_t *ent) { PF_UnlinkEdict(ent); }
 void he_pmove(void *pm) { PF_Pmove(pm); }
+
+trace_t q_gameabi he_clip(const vec3_t start, const vec3_t mins, const vec3_t maxs,
+                        const vec3_t end, edict_t *ent, int mask)
+{
+    return SV_Clip(start, mins, maxs, end, ent, mask);
+}
+
+static uint32_t he_recipients;
+
+static void he_receive(client_t *client, const byte *data, size_t len, bool reliable)
+{
+    he_recipients |= UINT32_C(1) << client->number;
+}
+
+uint32_t he_multicast(const vec3_t origin, multicast_t mode, const byte *data, size_t len, int maxclients)
+{
+    static client_t clients[32];
+    Q_assert(maxclients <= q_countof(clients));
+    Q_assert(LIST_EMPTY(&sv_clientlist));
+    for (int i = 0; i < maxclients; i++) {
+        edict_t *ent = EDICT_NUM(i + 1);
+        if (!ent->inuse || !ent->client)
+            continue;
+        client_t *client = &clients[i];
+        client->number = i;
+        client->edict = ent;
+        client->state = cs_spawned;
+        client->AddMessage = he_receive;
+        List_Append(&sv_clientlist, &client->entry);
+    }
+    he_recipients = 0;
+    MSG_BeginWriting();
+    MSG_WriteData(data, len);
+    SV_Multicast(origin, mode);
+    List_Init(&sv_clientlist);
+    return he_recipients;
+}

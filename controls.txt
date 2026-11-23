@@ -144,3 +144,20 @@ neg-opentdm-crush-count | opentdm/g_utils.c | api3:box | 60 | t24_crush_overflow
 
 # real-clock fall kick during an OpenTDM timeout
 neg-opentdm-view-timeout | opentdm/p_view.c | api3:engine | 60 | t24_view_timeout_fall | /\/ (float) FALL_FRAMES;$/s/fall_framenum - level.realframenum/fall_framenum - level.framenum/
+
+# Server packet pacing, shot-time estimates and backup command handling.
+neg-pacing-hold | q2pro/src/server/main.c | client | 60 | pacing_single_pause | s/cl->pacing.window.held_frames = .*;/cl->pacing.window.held_frames = 0;/
+neg-shot-time | q2pro/src/server/user.c | client | 60 | shot_time_estimate | s/^        UNLAG_ESTIMATE,$/        UNLAG_NO_ESTIMATE,/
+neg-empty-new-group | q2pro/src/server/user.c | client | 60 | shot_time_empty_new_group | /^    if (lastcmd) {/i\    if (!lastcmd \&\& numDups \&\& numCmds[0]) lastcmd = \&cmds[0][0];
+neg-rejected-backup | q2pro/src/server/user.c | client | 60 | shot_time_rejected_backup | s/^    if (lastcmd) {/    if (lastcmd \&\& (numCmds[numDups] || lastcmd_seen)) {/
+
+# Environment and entity reuse on the classic clock.
+neg-openffa-drown | openffa/p_view.c | api3:box | 60 | t23_drowning | s/+ 1 \* HZ + FRAMEDIV - 1;/+ 1 * HZ;/
+neg-opentdm-drown | opentdm/p_view.c | api3:box | 60 | t23_drowning | s/+ SECS_TO_FRAMES(1) + SECS_TO_FRAMES(0.1f) - 1;/+ SECS_TO_FRAMES(1);/
+neg-openffa-edict-reuse | openffa/g_utils.c | api3:box | 60 | t23_edict_reuse | s/return level\.framenum - ent->freed_framenum > HZ \/ 2;/return level.time - (float)(ent->freed_framenum * FRAMETIME) > 0.5f;/
+
+# Hitscan history and rail traversal.
+neg-openffa-unlag | openffa/g_unlag.c | api3:engine | 60 | unlag_rail | s/shot.rewind = shot.age > 0;/shot.rewind = false;/
+neg-opentdm-unlag | opentdm/g_unlag.c | api3:engine | 60 | unlag_rail | s/shot.rewind = shot.age > 0;/shot.rewind = false;/
+neg-openffa-unlag-rail | openffa/g_unlag.c | api3:engine | 60 | unlag_rail_mixed_overlap | s/^        rail->passed\[rail->count++\].ent = ignore;$/        (void)ignore;/
+neg-opentdm-unlag-rail | opentdm/g_unlag.c | api3:engine | 60 | unlag_rail_mixed_overlap | s/^        rail->passed\[rail->count++\].ent = ignore;$/        (void)ignore;/

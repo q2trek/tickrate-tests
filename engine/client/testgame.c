@@ -7,14 +7,19 @@
  */
 #include "shared/shared.h"
 #include "shared/game.h"
+#include "shared/gameext.h"
+#include "shared/unlag.h"
 
 extern void h_game_runframe(game_import_t *gi, edict_t *edicts, int frame) __attribute__((weak));
 extern void h_game_command(game_import_t *gi, edict_t *ent) __attribute__((weak));
-extern void h_game_think(edict_t *ent) __attribute__((weak));
+extern void h_game_think(edict_t *ent, usercmd_t *cmd) __attribute__((weak));
+extern void h_game_unlag(const unlag_api_v1_t *api) __attribute__((weak));
+extern void h_game_unlag_think(const unlag_api_v1_t *api, edict_t *ent, edict_t *other) __attribute__((weak));
 
 #define H_MAX_EDICTS 64
 static game_import_t gi;
 static game_export_t ge;
+static const unlag_api_v1_t *unlag;
 static edict_t edicts[H_MAX_EDICTS];
 static gclient_new_t clients[16];
 static int frames;
@@ -62,11 +67,15 @@ static void G_ClientBegin(edict_t *ent)
 static void G_ClientUserinfoChanged(edict_t *ent, char *userinfo) { (void)ent; (void)userinfo; }
 static void G_ClientDisconnect(edict_t *ent) { ent->inuse = qfalse; }
 static void G_ClientCommand(edict_t *ent) { if (h_game_command) h_game_command(&gi, ent); }
-static void G_ClientThink(edict_t *ent, usercmd_t *cmd) { (void)cmd; if (h_game_think) h_game_think(ent); }
+static void G_ClientThink(edict_t *ent, usercmd_t *cmd) {
+    if (h_game_think) h_game_think(ent, cmd);
+    if (h_game_unlag_think) h_game_unlag_think(unlag, ent, ent == &edicts[1] ? &edicts[2] : &edicts[1]);
+}
 
 static void G_RunFrame(void)
 {
     frames++;
+    if (h_game_unlag) h_game_unlag(unlag);
     if (h_game_runframe)
         h_game_runframe(&gi, edicts, frames);
 }
@@ -93,4 +102,14 @@ q_exported game_export_t *GetGameAPI(game_import_t *import)
     ge.RunFrame = G_RunFrame;
     ge.ServerCommand = G_ServerCommand;
     return &ge;
+}
+
+q_exported const game_export_ex_t *GetGameAPIEx(const game_import_ex_t *import)
+{
+    static const game_export_ex_t exports = {
+        .apiversion = GAME_API_VERSION_EX,
+        .structsize = sizeof(exports),
+    };
+    unlag = import->GetExtension(UNLAG_API_V1);
+    return &exports;
 }

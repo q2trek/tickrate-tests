@@ -2174,6 +2174,45 @@ static void sc_t11_bfg_wall(void)
     }
 }
 
+static void h_tdm_pair(edict_t **a, edict_t **b)
+{
+    h_scene_base();
+    h_ent("{\n\"classname\" \"info_player_deathmatch\"\n\"origin\" \"300 0 24\"\n\"angle\" \"0\"\n}\n");
+    h_start(h_ents);
+    *a = h_join(0, "p1");
+    *b = h_join(1, "p2");
+    h_frames_n(3 * h_rate);
+}
+
+
+static void h_real_phase(int k)
+{
+#ifdef HARNESS_OPENTDM
+    while (level.realframenum % h_div != k) h_frame();
+#else
+    while (level.framenum % h_div != k) h_frame();
+#endif
+}
+
+
+static void h_hit(edict_t *p, int damage)
+{
+    vec3_t dir = { 0, 0, 0 };
+    T_Damage(p, g_edicts, g_edicts, dir, p->s.origin, dir, damage, 0, 0, MOD_TRIGGER_HURT);
+}
+
+
+static int h_count_prefix(const char *prefix, int from)
+{
+    int c = 0;
+    for (int i = from; i < h_nsounds; i++) {
+        const char *n = h_sounds[h_sounds_log[i].soundindex];
+        c += n && !strncmp(n, prefix, strlen(prefix));
+    }
+    return c;
+}
+
+
 /* ---------------------------------------------------------------- T15 */
 
 #ifdef HARNESS_OPENTDM
@@ -2207,15 +2246,6 @@ static const char *h_hud_text(int frames)
 }
 
 /* two players in the two teams, past the team command rate limit */
-static void h_tdm_pair(edict_t **a, edict_t **b)
-{
-    h_scene_base();
-    h_ent("{\n\"classname\" \"info_player_deathmatch\"\n\"origin\" \"300 0 24\"\n\"angle\" \"0\"\n}\n");
-    h_start(h_ents);
-    *a = h_join(0, "p1");
-    *b = h_join(1, "p2");
-    h_frames_n(3 * h_rate);
-}
 
 /* both teams ready; runs the countdown and returns 1 once the match plays */
 static int h_tdm_start(edict_t *a, edict_t *b)
@@ -2528,16 +2558,7 @@ static void sc_t17_ping_handicap(void)
 #ifdef HARNESS_OPENTDM
 /* idle frames until the next frame has real frame phase k of the 100 ms
  * window (ClientEndServerFrame sees realframenum before its increment) */
-static void h_real_phase(int k)
-{
-    while (level.realframenum % h_div != k) h_frame();
-}
 
-static void h_hit(edict_t *p, int damage)
-{
-    vec3_t dir = { 0, 0, 0 };
-    T_Damage(p, g_edicts, g_edicts, dir, p->s.origin, dir, damage, 0, 0, MOD_TRIGGER_HURT);
-}
 
 /* One hit, in every phase of the window: the HUD flash lasts one 100 ms
  * window (h_div frames), not one world frame. */
@@ -2639,15 +2660,6 @@ static void sc_t18_lava_sound(void)
 }
 
 /* sound calls since log index `from` whose name starts with `prefix` */
-static int h_count_prefix(const char *prefix, int from)
-{
-    int c = 0;
-    for (int i = from; i < h_nsounds; i++) {
-        const char *n = h_sounds[h_sounds_log[i].soundindex];
-        c += n && !strncmp(n, prefix, strlen(prefix));
-    }
-    return c;
-}
 
 /* A hard landing (fall damage), in every phase of the window: the fall
  * sound, and no normal pain sound with it (the feedback of its window). */
@@ -3788,6 +3800,2355 @@ static void sc_t24_toss_timeout(void)
 #endif
 #endif
 
+/* ---------------------------------------------------------------- T23 */
+
+#ifdef HARNESS_OPENTDM
+/* OpenTDM's engine applies userinfo separately from ClientConnect. */
+static void h_t23_userinfo(edict_t *p, const char *name, unsigned code)
+{
+    char userinfo[MAX_INFO_STRING];
+    snprintf(userinfo, sizeof(userinfo), "\\name\\%s\\skin\\male/grunt\\fov\\90\\joincode\\%u",
+             name, code);
+    ge->ClientUserinfoChanged(p, userinfo);
+}
+
+static int h_t23_announcements(const char *text, int from, int *first)
+{
+    int n = 0;
+    *first = -1;
+    for (int i = from; i < h_nbprints; i++) {
+        if (!strstr(h_bprints[i].text, text)) continue;
+        if (!n++) *first = h_bprints[i].frame;
+    }
+    return n;
+}
+
+static void h_t23_announcement(const char *event, const char *text, int from, int start, int ticks)
+{
+    int when, n = h_t23_announcements(text, from, &when);
+    CHECK(n == 1 && when - start == ticks, "%s: one announcement at %d ticks (got %d at %d)",
+          event, ticks, n, when - start);
+    h_t23_sample(event, when - start, n);
+}
+
+static void h_t23_countdown(edict_t *a, edict_t *b)
+{
+    int bp = h_nbprints, start = h_frames;
+    h_client_command(a, "ready");
+    h_frames_n(40 * h_rate + 1);
+    int nags = 0;
+    for (int i = bp; i < h_nbprints; i++) {
+        if (!strstr(h_bprints[i].text, "Waiting on p2")) continue;
+        int elapsed = h_bprints[i].frame - start;
+        nags++;
+        CHECK(elapsed == nags * 20 * h_rate, "ready reminder %d after %d ticks", nags, elapsed);
+        h_t23_sample(va("ready_nag_%d", nags), elapsed, 1);
+    }
+    CHECK(nags == 2, "ready: two 20 s reminders (got %d)", nags);
+
+    int sounds = h_nsounds;
+    bp = h_nbprints;
+    start = h_frames;
+    h_client_command(b, "ready");
+    h_t23_announcement("countdown", "Starting countdown", bp, start, 0);
+    CHECK(tdm_match_status == MM_COUNTDOWN, "match enters countdown");
+    h_frames_n(15 * h_rate + 1);
+    h_t23_announcement("fight", "Fight!", bp, start, 15 * h_rate);
+    int idx = imp_soundindex("world/10_0.wav");
+    int n = h_count_sounds(idx, sounds), at = -1;
+    for (int i = sounds; i < h_nsounds; i++)
+        if (h_sounds_log[i].soundindex == idx) at = h_sounds_log[i].frame;
+    CHECK(n == 1 && start + 15 * h_rate - at == 104 * h_rate / 10,
+          "countdown sound 10.4 s before Fight! (got %d sounds at tick %d)", n, at - start);
+    h_t23_sample("countdown_sound", at - start, n);
+    n = h_announced(bp, CS_TDM_TIMELIMIT_STRING, "countdown");
+    CHECK(n == 5, "countdown has five HUD announcements");
+    h_t23_sample("countdown_numbers", 0, n);
+}
+
+static void sc_t23_match_phases(void)
+{
+    h_set_override("g_match_time", "12");
+    h_set_override("g_overtime", "4");
+    h_set_override("g_force_screenshot", "1");
+    edict_t *a, *b;
+    h_tdm_pair(&a, &b);
+    h_t23_userinfo(a, "p1", 0);
+    h_t23_userinfo(b, "p2", 0);
+    h_t23_countdown(a, b);
+    CHECK(tdm_match_status == MM_PLAYING, "Fight! enters regulation");
+    if (tdm_match_status != MM_PLAYING) return;
+
+    int start = h_frames - 1, bp = h_nbprints;
+    h_frames_n(2 * h_rate);
+    CHECK(!strcmp(h_timer_at(h_frames - 1), " 0:10"), "regulation HUD has ten seconds left");
+    CHECK(!strcmp(gi.cvar("time_remaining", "", 0)->string, "0:10"), "serverinfo advertises ten seconds left");
+    h_t23_sample("regulation_hud", h_frames - start - 1, atoi(h_timer_at(h_frames - 1) + 3));
+    h_frames_n(10 * h_rate);
+    h_t23_announcement("overtime", "adding", bp, start, 12 * h_rate);
+    CHECK(tdm_match_status == MM_OVERTIME,
+          "tied regulation advances to timed overtime");
+
+    /* On a tied overtime boundary the sudden-death rule has no clock. */
+    gi.cvar_forceset("g_tie_mode", "2");
+    h_frames_n(4 * h_rate);
+    h_t23_announcement("sudden_death", "entering Sudden Death", bp, start, 16 * h_rate);
+    h_frames_n(2 * h_rate);
+    CHECK(tdm_match_status == MM_SUDDEN_DEATH, "tie persists past the old deadline");
+    vec3_t dir = { 0, 0, 0 };
+    T_Damage(b, a, a, dir, b->s.origin, dir, 200, 0, DAMAGE_NO_PROTECTION, MOD_RAILGUN);
+    int tx = h_ntexts;
+    h_frame();
+    CHECK(tdm_match_status == MM_SCOREBOARD,
+          "first sudden-death frag ends the match");
+    int end = h_frames - 1;
+    h_t23_sample("finished", end - start, tdm_match_status);
+    h_frames_n(5 * h_rate - 1);
+    CHECK(tdm_match_status == MM_SCOREBOARD, "scoreboard still open one step before five seconds");
+    h_frame();
+    CHECK(tdm_match_status == MM_WARMUP,
+          "scoreboard ends in warmup");
+    h_t23_sample("warmup", h_frames - end - 1, tdm_match_status);
+    for (int slot = 0; slot < 2; slot++) {
+        edict_t *p = slot ? b : a;
+        const htext_t *shot = h_text_to(p, H_SVC_STUFFTEXT, "screenshot", tx);
+        CHECK(shot && shot->frame - end == h_rate / 2, "p%d screenshot 0.5 s after match end", slot + 1);
+        h_t23_sample(slot ? "screenshot_b" : "screenshot_a", shot ? shot->frame - end : -1, shot != NULL);
+    }
+}
+
+static void h_t23_wait_resume(void)
+{
+    for (int i = 0; i < 11 * h_rate && tdm_match_status == MM_TIMEOUT; i++) h_frame();
+    CHECK(tdm_match_status == MM_PLAYING, "timeout resumed play");
+}
+
+static int h_t23_players_seconds(edict_t *viewer, int slot)
+{
+    int tx = h_ntexts;
+    h_client_command(viewer, "players");
+    const htext_t *list = h_text_to(viewer, 0, "id    time", tx);
+    for (const char *line = list ? list->text : NULL; line; ) {
+        int id, min, sec;
+        if (sscanf(line, "%d %d:%d", &id, &min, &sec) == 3 && id == slot) return min * 60 + sec;
+        const char *next = strchr(line, '\n');
+        line = next ? next + 1 : NULL;
+    }
+    return -1;
+}
+
+static int h_t23_pause_clock(int frames)
+{
+    CHECK(!strcmp(h_timer_at(h_frames - 1), h_hud_text(frames)), "match HUD is rounded up (got %s)",
+          h_timer_at(h_frames - 1));
+    return tdm_match_status == MM_TIMEOUT;
+}
+
+static void sc_t23_timeout_clocks(void)
+{
+    h_set_override("g_match_time", "180");
+    h_set_override("g_max_timeout", "62");
+    h_set_override("g_timeout_limit", "1");
+    h_set_override("g_1v1_timeout", "15");
+    edict_t *a, *b;
+    h_tdm_pair(&a, &b);
+    if (!h_tdm_start(a, b)) return;
+    int age = level.framenum - a->client->resp.enterframe;
+    h_frames_n(205 * h_rate / 10 - age);
+    int left = level.match_end_framenum - level.framenum;
+    int before = h_t23_players_seconds(a, 0);
+    CHECK(before >= 0, "players includes the caller");
+    CHECK(!h_t23_pause_clock(left), "clock runs before time");
+    h_client_command(a, "time");
+    CHECK(tdm_match_status == MM_TIMEOUT, "time starts a pause");
+    int start = h_frames, bp = h_nbprints;
+    h_frames_n(2 * h_rate + 1);
+    h_t23_announcement("timeout_minute", "Automatically resuming in 1 minute", bp, start, 2 * h_rate);
+    int texts = h_ntexts;
+    edict_t *viewer = h_connect(2, "viewer");
+    CHECK(h_text_to(viewer, 0, "Match is currently paused and will auto resume in 0:59.", texts),
+          "new spectator gets the real-clock seconds left in the pause");
+    CHECK(h_t23_pause_clock(left) && h_t23_players_seconds(viewer, 0) == before,
+          "new spectator sees the frozen match clock and players time");
+    h_t23_sample("paused_players", h_frames - start, before);
+    h_frames_n(60 * h_rate);
+    h_t23_announcement("automatic_resume", "Game resuming", bp, start, 62 * h_rate);
+    h_t23_wait_resume();
+    h_t23_announcement("automatic_fight", "Fight!", bp, start, 724 * h_rate / 10);
+    h_frames_n(h_rate);
+    int after = h_t23_players_seconds(a, 0);
+    CHECK(!h_t23_pause_clock(level.match_end_framenum - level.framenum) && after == before + 1,
+          "match clock and players time advance after resume");
+    h_client_command(a, "time");
+    CHECK(h_text_to(a, 0, "Timeout limit exceeded (1/1)", 0) && tdm_match_status == MM_PLAYING,
+          "caller has spent their one timeout");
+
+    h_client_command(b, "time");
+    CHECK(tdm_match_status == MM_TIMEOUT, "other player can call time");
+    h_frames_n(h_rate);
+    start = h_frames;
+    bp = h_nbprints;
+    h_view_resume(b);
+    h_t23_announcement("manual_fight", "Fight!", bp, start, 104 * h_rate / 10);
+
+    unsigned code = a->client->resp.teamplayerinfo->joincode;
+    h_place(b, 800, 0, 24);
+    h_tick(b, 0, 1);
+    before = h_t23_players_seconds(b, 0);
+    ge->ClientDisconnect(a);
+    CHECK(tdm_match_status == MM_TIMEOUT, "duelist disconnect starts a pause");
+    h_frames_n(h_rate);
+    start = h_frames;
+    bp = h_nbprints;
+    char userinfo[MAX_INFO_STRING] = "\\name\\p1\\skin\\male/grunt";
+    CHECK(ge->ClientConnect(a, userinfo), "returning duelist connects");
+    h_t23_userinfo(a, "p1", code);
+    ge->ClientBegin(a);
+    int recovered = h_t23_players_seconds(b, 0);
+    CHECK(a->client->pers.team == TEAM_A && recovered == before,
+          "join code restores player and players time (%d -> %d)", before, recovered);
+    h_t23_wait_resume();
+    h_t23_announcement("duel_reconnect", "Fight!", bp, start, 104 * h_rate / 10);
+    h_t23_sample("recovered_players", 0, recovered);
+    start = h_frames;
+    bp = h_nbprints;
+    ge->ClientDisconnect(a);
+    CHECK(tdm_match_status == MM_TIMEOUT, "second duelist disconnect also pauses");
+    h_frames_n(15 * h_rate);
+    int announced;
+    CHECK(!h_t23_announcements("Game resuming", bp, &announced), "duel still paused one step before 15 seconds");
+    h_frame();
+    h_t23_announcement("duel_expiry", "Game resuming", bp, start, 15 * h_rate);
+}
+
+static int h_t23_score_ping(const htext_t *layout, const char *name)
+{
+    if (!layout) return -1;
+    const char *prefix = va("\"%s ", name);
+    for (const char *row = layout->text; (row = strstr(row, prefix)); row += strlen(prefix)) {
+        int frags, deaths, net, ping;
+        if (sscanf(row + strlen(prefix), "%d %d %d %d", &frags, &deaths, &net, &ping) == 4)
+            return ping;
+    }
+    return -1;
+}
+
+static const htext_t *h_t23_next_layout(edict_t *p, int since, int limit)
+{
+    for (int n = 0; n <= limit; n++) {
+        const htext_t *layout = h_text_to(p, H_SVC_LAYOUT, "Frags Dths Net Ping", since);
+        if (layout) return layout;
+        if (n < limit) h_frame();
+    }
+    return NULL;
+}
+
+static void sc_t23_scoreboard_handicap(void)
+{
+    h_set_override("g_ping_handicap", "50");
+    edict_t *a, *b;
+    h_tdm_pair(&a, &b);
+    h_t23_userinfo(a, "p1", 0);
+    h_t23_userinfo(b, "p2", 0);
+    edict_t *s = h_connect(2, "watcher");
+    h_t23_userinfo(s, "watcher", 0);
+    if (!h_tdm_start(a, b)) return;
+    h_frames_n(2 * h_rate);
+    a->client->ping = 12;
+    b->client->ping = 77;
+    s->client->ping = 81;
+    int tx = h_ntexts;
+    if (s->client->pers.menu.active) h_client_command(s, "score");
+    h_client_command(s, "score");
+    const htext_t *layout = h_t23_next_layout(s, tx, 0);
+    CHECK(layout, "score sends match layout");
+    int start = -1, prior = -1;
+    for (int i = 0; i < 4; i++) {
+        tx = h_ntexts;
+        layout = h_t23_next_layout(s, tx, 3 * h_rate);
+        CHECK(layout, "live scoreboard refresh %d", i + 1);
+        if (!layout) return;
+        if (start < 0) start = layout->frame;
+        CHECK(prior < 0 || layout->frame - prior == 3 * h_rate, "live layout interval is 3 s");
+        prior = layout->frame;
+        int tick = (level.framenum - 1) / h_div;
+        int want = tick % 8 == 0 ? 53 : tick % 4 == 0 ? 48 : 50;
+        int got = h_t23_score_ping(layout, "p1");
+        CHECK(got == want && h_t23_score_ping(layout, "p2") == 77,
+              "match layout ping at tick %d: p1 %d (want %d), p2 unchanged", tick, got, want);
+        CHECK(strstr(layout->text, va(":%d(", want)) && strstr(layout->text, ":77(") &&
+              strstr(layout->text, "watcher:81"), "team averages and spectator row have expected ping");
+        h_t23_sample(va("active_%d", i), layout->frame - start, got);
+    }
+
+    int phase = level.framenum % (8 * h_div);
+    h_frames_n((8 * h_div - phase) % (8 * h_div));
+    h_client_command(a, "time");
+    CHECK(tdm_match_status == MM_TIMEOUT, "scoreboard stays open in timeout");
+    int frozen = level.framenum / h_div;
+    int want = frozen % 8 == 0 ? 53 : frozen % 4 == 0 ? 48 : 50;
+    prior = -1;
+    for (int i = 0; i < 3; i++) {
+        tx = h_ntexts;
+        layout = h_t23_next_layout(s, tx, 15 * h_rate / 10);
+        CHECK(layout, "paused scoreboard refresh %d", i + 1);
+        if (!layout) return;
+        if (i == 0) start = layout->frame;
+        CHECK(prior < 0 || layout->frame - prior == 15 * h_rate / 10, "timeout layout interval is 1.5 s");
+        prior = layout->frame;
+        int got = h_t23_score_ping(layout, "p1");
+        CHECK(got == want, "scoreboard ping is frozen in timeout at %d (got %d)", want, got);
+        h_t23_sample(va("paused_%d", i), layout->frame - start, got);
+    }
+    h_view_resume(a);
+    int end = h_frames;
+    int jitter = level.framenum / h_div;
+    int saved = jitter % 8 == 0 ? 53 : jitter % 4 == 0 ? 48 : 50;
+    TDM_EndMatch();
+    h_frames_n(5 * h_rate + 1);
+    a->client->ping = 111;
+    b->client->ping = 122;
+    tx = h_ntexts;
+    h_client_command(s, "oldscores");
+    layout = h_text_to(s, H_SVC_LAYOUT, "oldscoreboard: harness", tx);
+    CHECK(layout && h_t23_score_ping(layout, "p1") == saved && h_t23_score_ping(layout, "p2") == 77,
+          "oldscores retains both original pings after live pings change (p1 %d, want %d)",
+          h_t23_score_ping(layout, "p1"), saved);
+    h_t23_sample("oldscore", h_frames - end, h_t23_score_ping(layout, "p2"));
+}
+
+static int h_t23_limited(edict_t *p, const char *cmd)
+{
+    int tx = h_ntexts;
+    h_client_command(p, cmd);
+    return h_text_to(p, 0, "rate limiting", tx) != NULL;
+}
+
+static void h_t23_penalty(edict_t *p, const char *first, const char *repeat, int ticks, const char *event)
+{
+    int start = h_frames;
+    CHECK(!h_t23_limited(p, first), "%s: initial '%s' accepted", event, first);
+    int same = h_t23_limited(p, repeat);
+    CHECK(same, "%s: same-frame '%s' rate limited", event, repeat);
+    h_frames_n(ticks - 1);
+    int prior = h_t23_limited(p, repeat);
+    CHECK(prior, "%s: '%s' rate limited one tick before %d", event, repeat, ticks);
+    h_frame();
+    int limited = h_t23_limited(p, repeat);
+    CHECK(!limited, "%s: '%s' accepted at %d ticks without input", event, repeat, ticks);
+    h_t23_sample(event, h_frames - start, same + prior + !limited);
+}
+
+static void h_t23_vote_penalties(edict_t *a, edict_t *b)
+{
+    static const struct { const char *command, *event; unsigned flags; } cases[] = {
+        { "vote timelimit 4", "vote_time", VOTE_TIMELIMIT },
+        { "vote map fixture_map", "vote_map", VOTE_MAP },
+        { "vote weapons -rg", "vote_weapons", VOTE_WEAPONS },
+        { "vote kick 2", "vote_kick", VOTE_KICK },
+        { "vote powerups -quad", "vote_powerups", VOTE_POWERUPS },
+        { "vote gamemode duel", "vote_mode", VOTE_GAMEMODE },
+        { "vote tiemode sd", "vote_tie", VOTE_TIEMODE },
+        { "vote telemode nofreeze", "vote_tele", VOTE_TELEMODE },
+        { "vote switchmode fast", "vote_switch", VOTE_SWITCHMODE },
+        { "vote overtime 2", "vote_overtime", VOTE_OVERTIME },
+        { "vote chat players", "vote_chat", VOTE_CHAT },
+        { "vote bugs 1", "vote_bugs", VOTE_BUGS },
+        { "vote smartmap 1", "vote_smartmap", VOTE_MAP },
+    };
+    smartmap_t *duel_maps = &game.smartmaps[SM_DUEL];
+    duel_maps->index = 0;
+    duel_maps->total = 4;
+    for (int i = 0; i < duel_maps->total; i++) duel_maps->maps[i] = "fixture_smartmap";
+    for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        h_client_command(a, "vote timelimit 2");
+        CHECK(vote.active && vote.flags == VOTE_TIMELIMIT, "replacement starts with an active vote");
+        edict_t *spectator = EDICT(3);
+        spectator->client->resp.last_invited_by = NULL;
+        h_t23_penalty(a, cases[i].command, "invite 2", 2 * h_rate, cases[i].event);
+        CHECK(spectator->client->resp.last_invited_by == a, "%s releases the invite at the deadline", cases[i].event);
+        CHECK(vote.active && vote.flags == cases[i].flags && vote.initiator == a,
+              "%s reaches its replacement proposal", cases[i].event);
+        if (cases[i].flags == VOTE_TIMELIMIT)
+            CHECK(vote.newtimelimit == 4, "timelimit replacement changes the proposed value");
+        h_client_command(a, "vote cancel");
+        h_frames_n(10 * h_rate);
+    }
+    h_client_command(a, "vote timelimit 2");
+    h_t23_penalty(b, "vote no", "vote yes", 2 * h_rate, "vote_yes_no");
+    CHECK(!vote.active && g_match_time->value == 120, "yes vote passes when its cooldown ends");
+    h_frames_n(2 * h_rate);
+}
+
+static void sc_t23_cmd_penalties(void)
+{
+    h_set_override("g_admin_password", HARNESS_MOD);
+    h_set_override("g_tdm_allow_pick", "1");
+    edict_t *a, *b;
+    h_tdm_pair(&a, &b);
+    edict_t *s = h_connect(2, "watcher");
+    h_t23_penalty(s, "team a", "team spec", 2 * h_rate, "team");
+    CHECK(s->client->pers.team == TEAM_SPEC, "team penalty sequence ends in spectator");
+    h_t23_penalty(a, "invite 2", "invite 2", 2 * h_rate, "invite");
+    CHECK(s->client->resp.last_invited_by == a, "invite path reached spectator");
+    h_frames_n(2 * h_rate);
+    edict_t *other = h_connect(3, "other");
+    h_place(a, -800, 0, 24);
+    h_tick(a, 0, 1);
+    h_place(b, 800, 0, 24);
+    h_tick(b, 0, 1);
+    h_t23_penalty(a, "pick 2", "pick 3", h_rate, "pick");
+    CHECK(s->client->pers.team == TEAM_A && other->client->pers.team == TEAM_A,
+          "both pick targets actually join the team");
+    h_client_command(s, "team spec");
+    h_client_command(other, "team spec");
+    h_frames_n(h_rate);
+    h_t23_penalty(a, "ready", "notready", h_rate, "ready");
+    CHECK(!a->client->resp.ready, "notready accepted");
+    h_frames_n(h_rate);
+    h_client_command(a, "ready");
+    h_frames_n(h_rate);
+    h_t23_penalty(a, "notready", "ready", h_rate, "notready");
+    CHECK(a->client->resp.ready, "ready accepted");
+    h_t23_penalty(s, "admin invalid", "admin invalid", h_rate, "admin");
+    CHECK(h_text_to(s, 0, "Invalid password", 0), "admin path reached credential check");
+    h_t23_vote_penalties(a, b);
+    if (!h_tdm_start(a, b)) return;
+    unsigned code = a->client->resp.teamplayerinfo->joincode;
+    int tx = h_ntexts;
+    h_t23_penalty(s, "ghost 12345", "ghost 12345", h_rate / 5, "ghost");
+    CHECK(h_text_to(s, 0, "No client information found", tx), "absent join code performs lookup");
+    h_frames_n(h_rate);
+    h_place(b, 800, 0, 24);
+    h_tick(b, 0, 1);
+    ge->ClientDisconnect(a);
+    CHECK(tdm_match_status == MM_TIMEOUT, "valid join-code fixture is paused");
+    char cmd[64];
+    snprintf(cmd, sizeof(cmd), "ghost %u", code);
+    h_t23_penalty(s, "ghost 12345", cmd, h_rate / 5, "ghost_paused");
+    CHECK(s->client->pers.team == TEAM_A, "valid join code restores the disconnected player");
+}
+
+static void sc_t23_vote_window(void)
+{
+    h_set_override("g_match_time", "90");
+    h_set_override("g_vote_time", "4");
+    h_set_override("g_tie_mode", "1");
+    edict_t *a, *b;
+    h_tdm_pair(&a, &b);
+    h_client_command(a, "vote overtime 3");
+    h_client_command(b, "vote yes");
+    CHECK(g_overtime->value == 180, "overtime vote converts minutes to seconds");
+    h_t23_sample("overtime_seconds", 0, (int)g_overtime->value);
+    int tx = h_ntexts;
+    OpenVoteMenu(a);
+    CHECK(h_text_to(a, H_SVC_LAYOUT, "Overtime:  3 minutes", tx) &&
+          h_text_to(a, H_SVC_LAYOUT, "Timelimit: 1 minutes", tx),
+          "warmup vote menu converts match time and overtime to minutes");
+    PMenu_Close(a);
+    h_frames_n(2 * h_rate);
+    if (!h_tdm_start(a, b)) return;
+    int start = h_frames, prints = h_nbprints;
+    h_client_command(a, "vote timelimit 2");
+    h_frame();
+    CHECK(strstr(h_cs_at(CS_TDM_VOTE_STRING, start), "Yes: 1 (2) No: 0 [04]"),
+          "vote HUD starts at 4 s with the initiator's yes");
+    h_client_command(b, "vote no");
+    h_frames_n(h_rate);
+    CHECK(strstr(h_cs_at(CS_TDM_VOTE_STRING, h_frames - 1), "Yes: 1 (2) No: 1 [03]"),
+          "vote HUD shows a tied ballot after one second");
+
+    h_client_command(a, "time");
+    CHECK(tdm_match_status == MM_TIMEOUT, "vote has an active timeout");
+    h_frames_n(5 * h_rate);
+    CHECK(vote.active && strstr(h_cs_at(CS_TDM_VOTE_STRING, h_frames - 1), "[03]"),
+          "vote HUD and expiry freeze in timeout");
+    h_view_resume(a);
+    int frozen = h_frames - start - (h_rate + 1) - 1;
+    h_frames_n(3 * h_rate);
+    h_t23_announcement("expired", "Vote failed.", prints, start, 4 * h_rate + frozen);
+    CHECK(!vote.active && !*h_cs_at(CS_TDM_VOTE_STRING, h_frames - 1), "vote HUD clears at expiry");
+
+    h_frames_n(start + 14 * h_rate + frozen - 1 - h_frames);
+    tx = h_ntexts;
+    h_client_command(a, "vote timelimit 2");
+    CHECK(!vote.active && h_text_to(a, 0, "wait a short time", tx), "re-proposal is rejected before 10 s");
+    h_frame();
+    int at = h_frames;
+    h_client_command(a, "vote timelimit 2");
+    CHECK(vote.active, "re-proposal opens on the first allowed match tick");
+    h_t23_sample("propose_again", at - start, vote.active);
+    h_client_command(b, "vote yes");
+    CHECK(!vote.active && g_match_time->value == 120 &&
+          level.match_end_framenum - level.match_start_framenum == 120 * h_rate,
+          "passing a vote extends the current deadline to two minutes");
+    tx = h_ntexts;
+    OpenVoteMenu(a);
+    CHECK(h_text_to(a, H_SVC_LAYOUT, "Timelimit: 2", tx), "in-match vote menu shows two minutes");
+    PMenu_Close(a);
+
+    a->client->pers.admin = true;
+    h_client_command(a, "tl 1");
+    a->client->pers.admin = false;
+    int deadline = level.match_start_framenum + 60 * h_rate;
+    tx = h_ntexts;
+    h_client_command(a, "tl");
+    CHECK(level.match_end_framenum == deadline && h_text_to(a, 0, "Timelimit is 1 minute.", tx),
+          "admin tl sets a one-minute deadline and the readback displays minutes");
+    h_t23_sample("admin_deadline", level.match_end_framenum - level.match_start_framenum, (int)g_match_time->value);
+    h_frames_n(deadline - level.framenum);
+    CHECK(tdm_match_status == MM_PLAYING, "regulation is active one step before overtime");
+    h_frame();
+    CHECK(tdm_match_status == MM_OVERTIME && level.match_end_framenum == deadline + 180 * h_rate,
+          "tie opens three minutes of overtime at one minute");
+    h_t23_sample("overtime_start", level.framenum - 1 - level.match_start_framenum, tdm_match_status);
+    h_client_command(a, "vote timelimit 2");
+    h_client_command(b, "vote yes");
+    CHECK(!vote.active && tdm_match_status == MM_PLAYING && level.match_end_framenum == deadline + 60 * h_rate,
+          "timelimit vote cancels overtime and restores regulation");
+    h_t23_sample("overtime_canceled", level.match_end_framenum - level.match_start_framenum, tdm_match_status);
+    CHECK(gi.cvar_set("g_tie_mode", "0")->value == 0, "fixture disables overtime");
+    h_frames_n(15 * h_rate);
+    h_client_command(a, "vote timelimit 1");
+    h_client_command(b, "vote yes");
+    h_frame();
+    CHECK(g_match_time->value == 60 && tdm_match_status == MM_SCOREBOARD,
+          "shortened timelimit that has already elapsed ends the match");
+    h_t23_sample("shortened_match", 0, tdm_match_status);
+}
+
+#endif
+
+/* Shared scenarios enter a live OpenTDM match or the OpenFFA active game. */
+static int h_t23_start(edict_t *a, edict_t *b)
+{
+#ifdef HARNESS_OPENTDM
+    return h_tdm_start(a, b);
+#else
+    CHECK(PlayerSpawned(a) && PlayerSpawned(b), "both players spawned");
+    return PlayerSpawned(a) && PlayerSpawned(b);
+#endif
+}
+
+static void h_t23_seed(unsigned seed)
+{
+#ifdef HARNESS_OPENTDM
+    init_genrand(seed);
+#else
+    Q_srand(seed);
+#endif
+}
+
+static int h_t23_print(edict_t *p, const char *cmd, const char *result)
+{
+    int tx = h_ntexts;
+    h_client_command(p, cmd);
+    return h_text_to(p, 0, result, tx) != NULL;
+}
+
+static void sc_t23_flood(void)
+{
+    h_set_override("flood_msgs", "2");
+    h_set_override("flood_waitdelay", "4");
+    h_set_override("flood_waves", "2");
+#ifdef HARNESS_OPENTDM
+    h_set_override("flood_waves_waitdelay", "1");
+    const char *wave_lock = "can't use waves for 1 minutes";
+#else
+    h_set_override("flood_perwave", "6");
+    h_set_override("flood_persecond", "4");
+    h_set_override("flood_wavedelay", "60");
+    const char *wave_lock = "can't use waves for 60 seconds";
+#endif
+    edict_t *a, *b;
+    h_tdm_pair(&a, &b);
+    if (!h_t23_start(a, b)) return;
+    h_frames_n(3 * h_rate);
+    int waves = 0;
+    for (int i = 0; i < 2; i++) {
+        waves += h_t23_print(a, "wave 1", "salute");
+        h_frames_n(2 * h_rate);
+    }
+    CHECK(waves == 2 && h_t23_print(a, "wave 1", wave_lock), "third wave starts a one minute lock");
+#ifndef HARNESS_OPENTDM
+    int wave_deadline = h_frames + 60 * h_rate;
+#endif
+    edict_t *viewer = h_connect(2, "reader");
+    CHECK(h_t23_print(a, "say window-one", ": window-one") &&
+          h_t23_print(a, "say window-two", ": window-two"), "two early messages fill the window");
+    CHECK(h_t23_print(b, "say expired-message", ": expired-message"), "first message enters the flood window");
+    h_frames_n(4 * h_rate - 1);
+    CHECK(h_t23_print(a, "say window-before", "can't talk for 4 seconds"),
+          "both early messages count until one step before the window closes");
+    h_frame();
+    int chat = h_t23_print(b, "say first", ": first");
+    int texts = h_ntexts;
+    chat += h_t23_print(b, "say second", ": second");
+    CHECK(chat == 2 && h_text_to(viewer, 0, ": second", texts), "older message leaves the window exactly at four seconds");
+    texts = h_ntexts;
+    CHECK(h_t23_print(b, "say third", "can't talk for 4 seconds") && !h_text_to(viewer, 0, ": third", texts),
+          "third message in the current window starts a four second lock and is not delivered");
+    int start = h_frames;
+#ifdef HARNESS_OPENTDM
+    h_client_command(a, "time");
+    CHECK(tdm_match_status == MM_TIMEOUT, "both flood locks started before pause");
+#endif
+    h_frames_n(3 * h_rate);
+    CHECK(h_t23_print(b, "say in-pause", "can't talk for 1 more second"), "one second remains on the chat lock");
+    h_frames_n(h_rate - 1);
+    CHECK(h_t23_print(b, "say early", "can't talk"), "chat blocked one step before deadline");
+    h_frame();
+    texts = h_ntexts;
+    int accepted = h_t23_print(b, "say allowed", ": allowed");
+    CHECK(accepted && h_text_to(viewer, 0, ": allowed", texts), "chat delivered on the deadline");
+    h_t23_sample("chat_unlocked", h_frames - start, accepted);
+
+#ifdef HARNESS_OPENTDM
+    h_view_resume(a);
+    CHECK(h_t23_print(b, "say after-resume", ": after-resume"), "chat remains unlocked after resume");
+    h_frames_n(56 * h_rate - 2);
+#else
+    h_frames_n(wave_deadline - 1 - h_frames);
+#endif
+    CHECK(!h_t23_print(a, "wave 1", "salute"), "wave blocked one step before deadline");
+    h_frame();
+    accepted = h_t23_print(a, "wave 1", "salute");
+    CHECK(accepted, "wave allowed on the first eligible step");
+    h_t23_sample("wave_unlocked", h_frames - start, accepted);
+}
+
+#ifdef HARNESS_OPENTDM
+static void sc_t23_mute(void)
+{
+    h_set_override("flood_msgs", "0");
+    edict_t *a, *b;
+    h_tdm_pair(&a, &b);
+    if (!h_tdm_start(a, b)) return;
+    edict_t *admin = h_connect(2, "moderator");
+    admin->client->pers.admin = true;
+    CHECK(h_t23_print(b, "say before", ": before"), "global chat enabled before mute");
+    CHECK(h_t23_print(admin, "mute 1", "muted for 5 minutes"), "default mute is five minutes");
+    CHECK(h_t23_print(b, "say default", "muted for 300 more seconds"), "five minute default sets a real deadline");
+    CHECK(h_t23_print(admin, "mute 1 90", "muted for 60 minutes"), "mute is capped at 60 minutes");
+    CHECK(h_t23_print(b, "say capped", "muted for 3600 more seconds"), "cap sets a one-hour deadline");
+    CHECK(h_t23_print(admin, "mute 1 1", "muted for 1 minute"), "one-minute mute set");
+    int start = h_frames;
+    h_frames_n(2 * h_rate);
+    int texts = h_ntexts;
+    CHECK(h_t23_print(b, "say before-pause", "muted for 58 more seconds") &&
+          !h_text_to(a, 0, ": before-pause", texts), "muted message is refused and not delivered before timeout");
+    h_client_command(a, "time");
+    h_frames_n(3 * h_rate);
+    CHECK(h_t23_print(b, "say in-pause", "muted for 58 more seconds"), "mute display freezes in timeout");
+    h_view_resume(a);
+    h_frames_n(58 * h_rate - 2);
+    CHECK(h_t23_print(b, "say early", "You are muted"), "chat blocked one match step before mute ends");
+    h_frame();
+    texts = h_ntexts;
+    int accepted = h_t23_print(b, "say deadline", ": deadline");
+    CHECK(accepted && h_text_to(a, 0, ": deadline", texts), "chat is delivered on first match step after mute ends");
+    h_t23_sample("unmuted", h_frames - start, accepted);
+    h_client_command(admin, "mute 1 1");
+    CHECK(h_t23_print(admin, "unmute 1", "is not muted anymore"), "admin can cancel an active mute");
+    accepted = h_t23_print(b, "say cancel-mute", ": cancel-mute");
+    CHECK(accepted, "explicit unmute allows chat immediately");
+    h_t23_sample("explicit_unmute", 0, accepted);
+}
+
+#endif
+static void sc_t23_inactivity(void)
+{
+#ifdef HARNESS_OPENTDM
+    h_set_override("g_motd_message", "fixture motd");
+#endif
+    h_set_override("g_idle_time", "12");
+    h_scene_base();
+    h_start(h_ents);
+    int start = h_frames, tx = h_ntexts;
+#ifdef HARNESS_OPENTDM
+    edict_t *a = h_join(0, "p1");
+    h_frames_n(11 * h_rate - h_frames);
+    const htext_t *motd = h_text_to(a, H_SVC_LAYOUT, "fixture motd", tx);
+    CHECK(motd && motd->frame - start == 10 * h_rate, "MOTD arrives after ten seconds");
+    h_t23_sample("motd", motd ? motd->frame - start : -1, motd != NULL);
+    h_client_command(a, "vote timelimit 1");
+    CHECK(g_match_time->value == 60, "one player applies a nondefault setting");
+    int idle = 13;
+#else
+    Q_strlcpy(game.motd, "fixture motd", sizeof(game.motd));
+    edict_t *a = h_connect(0, "p1");
+    h_frames_n(15 * h_rate / 10);
+    CHECK(!h_text_to(a, H_SVC_LAYOUT, "fixture motd", tx), "pregame MOTD waits for its deadline");
+    h_frame();
+    const htext_t *motd = h_text_to(a, H_SVC_LAYOUT, "fixture motd", tx);
+    CHECK(motd && motd->frame - start == 15 * h_rate / 10, "pregame MOTD arrives after 1.5 seconds");
+    h_t23_sample("motd", motd ? motd->frame - start : -1, motd != NULL);
+    h_tick(a, BUTTON_ATTACK, 1);
+    h_tick(a, 0, 1);
+    int idle = 12;
+#endif
+    h_frames_n(11 * h_rate);
+    h_think(a, BUTTON_ATTACK, 10);
+    h_think(a, 0, 10);
+    h_frames_n(11 * h_rate);
+#ifdef HARNESS_OPENTDM
+    CHECK(a->client->pers.team == TEAM_A, "button transition refreshes warmup activity");
+    h_client_command(a, "settings");
+    start = h_frames;
+#else
+    CHECK(PlayerSpawned(a), "button transition refreshes player activity");
+    start = h_frames - 11 * h_rate;
+#endif
+    int prints = h_nbprints;
+#ifdef HARNESS_OPENTDM
+    h_frames_n(start + idle * h_rate - h_frames);
+#else
+    h_frames_n(start + idle * h_rate + 1 - h_frames);
+#endif
+#ifdef HARNESS_OPENTDM
+    CHECK(a->client->pers.team == TEAM_A, "command refreshes warmup activity");
+#else
+    CHECK(PlayerSpawned(a), "player stays active through the idle deadline");
+#endif
+    h_frame();
+#ifdef HARNESS_OPENTDM
+    h_t23_announcement("idle", "due to inactivity", prints, start, idle * h_rate);
+    CHECK(a->client->pers.team == TEAM_SPEC, "inactive team player moves to spectator");
+    int left = h_frames - 1;
+    h_frames_n(left + 300 * h_rate - h_frames);
+    CHECK(g_match_time->value == 60, "defaults are still pending one step before 300 s of inactivity");
+    h_frame();
+    int when, resets = h_t23_announcements("restoring default match settings", prints, &when);
+    CHECK(resets == 1 && when == left + 300 * h_rate && g_match_time->value == 600,
+          "empty session restores defaults exactly 300 s after the last player leaves");
+    h_t23_sample("reset", when - left, resets);
+#else
+    int removed = 0;
+    for (int i = prints; i < h_nbprints; i++)
+        removed += strstr(h_bprints[i].text, "due to inactivity") != NULL;
+    CHECK(a->client->pers.connected == CONN_SPECTATOR && removed == 1, "inactive player moves to spectator once");
+    h_t23_sample("idle", h_frames - start - 1, removed);
+#endif
+    CHECK(!motd || !h_text_to(a, H_SVC_LAYOUT, "fixture motd", (int)(motd - h_texts) + 1),
+          "MOTD is shown only once");
+}
+
+static edict_t *h_t23_item(const char *name)
+{
+    edict_t *item = G_Find(NULL, FOFS(classname), (char *)name);
+    CHECK(item && item->solid == SOLID_TRIGGER && item->touch, "%s is available for pickup", name);
+    return item && item->touch ? item : NULL;
+}
+
+static void sc_t23_item_respawn(void)
+{
+    static const struct { const char *name; const char *cvar; int seconds; } items[] = {
+#ifdef HARNESS_OPENTDM
+        { "weapon_railgun", "g_respawn_weapon", 3 },
+        { "ammo_shells", "g_respawn_ammo", 4 },
+        { "item_armor_body", "g_respawn_armor", 5 },
+        { "item_health", "g_respawn_health", 6 },
+        { "item_quad", "g_respawn_quad", 8 },
+        { "item_health_mega", "g_respawn_mega", 7 },
+        { "item_adrenaline", "g_respawn_adren", 9 },
+        { "item_ancient_head", NULL, 60 },
+        { "item_bandolier", NULL, 60 },
+        { "item_pack", "g_respawn_backpack", 10 },
+        { "item_power_screen", "g_respawn_ps", 11 },
+        { "item_power_shield", "g_respawn_ps", 11 },
+        { "item_invulnerability", "g_respawn_invuln", 12 },
+#else
+        { "weapon_railgun", NULL, 30 },
+        { "ammo_shells", NULL, 30 },
+        { "item_armor_body", NULL, 20 },
+        { "item_health", NULL, 30 },
+        { "item_quad", NULL, 60 },
+        { "item_health_mega", NULL, 20 },
+        { "item_adrenaline", NULL, 60 },
+        { "item_ancient_head", NULL, 60 },
+        { "item_bandolier", NULL, 60 },
+        { "item_pack", NULL, 180 },
+        { "item_power_screen", NULL, 60 },
+        { "item_power_shield", NULL, 60 },
+        { "item_invulnerability", NULL, 300 },
+#endif
+    };
+    char values[sizeof(items) / sizeof(items[0])][16];
+    h_set_override("g_timeout_limit", "0");
+    h_scene_base();
+    h_ent("{\n\"classname\" \"info_player_deathmatch\"\n\"origin\" \"300 0 24\"\n}\n");
+    for (unsigned i = 0; i < sizeof(items) / sizeof(items[0]); i++) {
+        if (items[i].cvar) {
+            snprintf(values[i], sizeof(values[i]), "%d", items[i].seconds);
+            h_set_override(items[i].cvar, values[i]);
+        }
+        h_ent("{\n\"classname\" \"%s\"\n\"origin\" \"%d 1000 40\"\n}\n", items[i].name, 64 * (int)i);
+    }
+    h_start(h_ents);
+    edict_t *a = h_join(0, "p1"), *b = h_join(1, "p2");
+    h_frames_n(3 * h_rate);
+    if (!h_t23_start(a, b)) return;
+    for (unsigned i = 0; i < sizeof(items) / sizeof(items[0]); i++) {
+        edict_t *item = h_t23_item(items[i].name);
+        if (!item) return;
+        int start = h_frames, paused = 0;
+        a->health = i == 5 ? 2 : 50; /* mega takes just two one-point decay steps */
+        int pickup = CS_ITEMS + ITEM_INDEX(item->item);
+        item->touch(item, a, NULL, NULL);
+        CHECK(item->solid == SOLID_NOT && (item->svflags & SVF_NOCLIENT) &&
+              h_stat(a, STAT_PICKUP_STRING) == pickup, "%s pickup hides the item", items[i].name);
+#ifdef HARNESS_OPENTDM
+        if (i == 0) {
+            h_client_command(a, "time");
+            h_frames_n(4 * h_rate);
+            CHECK(tdm_match_status == MM_TIMEOUT && item->solid == SOLID_NOT, "item stays hidden across its wall-time deadline");
+            h_view_resume(a);
+            paused = h_frames - start - 1;
+        }
+#endif
+        if (i == 5) {
+            h_frames_n(5 * h_rate);
+            CHECK(a->health == 102, "mega health holds for five seconds");
+            h_frame();
+            CHECK(a->health == 101, "mega health starts one-point decay");
+            h_frames_n(h_rate);
+            CHECK(a->health == 100, "mega health decays again one second later");
+            h_t23_sample("mega_decay", h_frames - start - 1, a->health);
+            h_frames_n(h_rate - 1);
+            start = h_frames;
+        }
+        int deadline = start + paused + items[i].seconds * h_rate;
+        h_frames_n(deadline - h_frames);
+        CHECK(item->solid == SOLID_NOT, "%s absent one step before respawn", items[i].name);
+        h_frame();
+        int visible = item->solid == SOLID_TRIGGER && !(item->svflags & SVF_NOCLIENT);
+        CHECK(visible, "%s respawns on its deadline", items[i].name);
+        h_t23_sample(items[i].name, h_frames - start - paused - 1, visible);
+        if (i == 3) a->health = 50;
+        if (i == 2) a->client->inventory[ITEM_INDEX(item->item)] = 0;
+        if (visible) item->touch(item, a, NULL, NULL);
+        CHECK(visible && item->solid == SOLID_NOT && h_stat(a, STAT_PICKUP_STRING) == pickup,
+              "%s can be picked up again", items[i].name);
+    }
+}
+
+static void sc_t23_dropped_items(void)
+{
+    char flags[16];
+    snprintf(flags, sizeof(flags), "%d", DF_QUAD_DROP);
+#ifdef HARNESS_OPENTDM
+    h_set_override("g_tdmflags", flags);
+    h_set_override("g_1v1flags", flags);
+#else
+    h_set_override("dmflags", flags);
+#endif
+    edict_t *a, *b;
+    h_tdm_pair(&a, &b);
+    if (!h_t23_start(a, b)) return;
+    gitem_t *item = (gitem_t *)FindItem("Shells");
+    edict_t *drop = Drop_Item(a, item);
+    drop->movetype = MOVETYPE_NONE;
+    int start = h_frames, index = ITEM_INDEX(item), initial = a->client->inventory[index];
+    h_frames_n(h_rate);
+    drop->touch(drop, a, NULL, NULL);
+    CHECK(drop->inuse && a->client->inventory[index] == initial, "owner blocked before pickup opens");
+    h_frame();
+    drop->touch(drop, a, NULL, NULL);
+    CHECK(!drop->inuse && a->client->inventory[index] > initial, "owner can pick up after one second");
+    h_t23_sample("owner_pickup", h_frames - start - 1, a->client->inventory[index] - initial);
+
+    drop = Drop_Item(a, item);
+    drop->movetype = MOVETYPE_NONE;
+    start = h_frames;
+    h_frames_n(30 * h_rate);
+    CHECK(drop->inuse, "untouched drop still exists one step before 30 s");
+    h_frame();
+    CHECK(!drop->inuse, "untouched drop disappears at 30 s");
+    h_t23_sample("drop_expired", h_frames - start - 1, !drop->inuse);
+
+    a->client->quad_framenum = level.framenum + 2 * h_rate;
+    h_hit(a, 200);
+    drop = G_Find(NULL, FOFS(classname), "item_quad");
+    CHECK(drop && (drop->spawnflags & DROPPED_PLAYER_ITEM), "death drops a quad with two seconds left");
+    if (!drop) return;
+    start = h_frames;
+    h_frames_n(h_rate / 2);
+    drop->touch(drop, b, NULL, NULL);
+    h_frame();
+    CHECK(!drop->inuse && (b->s.effects & EF_QUAD), "pickup transfers dropped quad to opponent");
+    h_frames_n(start + 2 * h_rate - h_frames);
+    int icon = imp_imageindex("p_quad");
+    CHECK(h_stat(b, STAT_TIMER_ICON) == icon, "transferred quad still active one step before the original deadline");
+    h_frame();
+    CHECK(h_stat(b, STAT_TIMER_ICON) != icon && !(b->s.effects & EF_QUAD), "transferred quad ends on the original deadline");
+    h_t23_sample("inherited_quad", h_frames - start - 1, !!(b->s.effects & EF_QUAD));
+    b->client->quad_framenum = level.framenum + h_rate;
+    h_hit(b, 200);
+    CHECK(!G_Find(NULL, FOFS(classname), "item_quad"), "no drop with exactly one second left");
+    h_t23_sample("short_quad_drop", 0, G_Find(NULL, FOFS(classname), "item_quad") != NULL);
+}
+
+static const struct {
+    const char *name, *icon, *warning;
+    int effect;
+} t23_powerups[] = {
+    { "quad damage", "p_quad", "items/damage2.wav", EF_QUAD },
+    { "invulnerability", "p_invulnerability", "items/protect2.wav", EF_PENT },
+    { "environment suit", "p_envirosuit", "items/airout.wav", 0 },
+    { "rebreather", "p_rebreather", "items/airout.wav", 0 },
+};
+
+static void h_t23_use_powerup(edict_t *p, int index)
+{
+    const char *name = t23_powerups[index].name;
+    h_give(p, name, 0);
+    h_client_command(p, va("use %s", name));
+}
+
+static int h_t23_blaster_damage(edict_t *p, edict_t *target)
+{
+    h_real_phase(0);
+    h_tick(p, BUTTON_ATTACK, 1);
+    edict_t *bolt = h_by_class("bolt", 0);
+    for (int i = 0; !bolt && i < h_div; i++) {
+        h_tick(p, BUTTON_ATTACK, 1);
+        bolt = h_by_class("bolt", 0);
+    }
+    CHECK(bolt && bolt->owner == p, "blaster created a projectile");
+    if (!bolt) return 0;
+    int hp = h_hp_now(target);
+    cplane_t plane = { 0 };
+    bolt->touch(bolt, target, &plane, NULL);
+    h_tick(p, 0, 1);
+    return hp - h_hp_now(target);
+}
+
+static void sc_t23_powerup_lifetime(void)
+{
+    edict_t *a, *b;
+    h_tdm_pair(&a, &b);
+    if (!h_t23_start(a, b)) return;
+    h_place(a, -800, 0, 24);
+    h_tick(a, 0, 1);
+    h_place(b, 800, 0, 24);
+    h_tick(b, 0, 1);
+    h_frames_n(2 * h_rate);
+    edict_t *s = h_connect(2, "observer");
+#ifdef HARNESS_OPENTDM
+    h_client_command(s, "chase");
+    CHECK(s->client->chase_target != NULL, "spectator follows a player");
+    SetChase(s, a);
+#else
+    SetChaseTarget(s, a);
+    CHECK(s->client->chase_target == a, "spectator follows a player");
+#endif
+    int invul_sound = imp_soundindex("items/protect4.wav");
+    for (unsigned i = 0; i < sizeof(t23_powerups) / sizeof(t23_powerups[0]); i++) {
+        int start = h_frames, icon = imp_imageindex(t23_powerups[i].icon);
+        h_t23_use_powerup(a, i);
+        h_frame();
+        CHECK(h_stat(a, STAT_TIMER) == 30 && h_stat(a, STAT_TIMER_ICON) == icon,
+              "%s starts with 30 s and its icon", t23_powerups[i].name);
+        h_frames_n(h_rate - 1);
+        h_t23_use_powerup(a, i);
+        h_frame();
+        CHECK(h_stat(a, STAT_TIMER) == 59 && h_stat(a, STAT_TIMER_ICON) == icon,
+              "%s adds 30 s to its remaining duration", t23_powerups[i].name);
+        CHECK(h_stat(s, STAT_TIMER) == 59 && h_stat(s, STAT_TIMER_ICON) == icon,
+              "observer sees the extended timer");
+        h_t23_sample(va("extended_%d", i), h_frames - start - 1, h_stat(a, STAT_TIMER));
+        if (i == 0) {
+            int sounds = h_nsounds, quad = imp_soundindex("items/damage3.wav");
+            int dealt = h_t23_blaster_damage(a, b);
+            CHECK(dealt == 60 && h_count_sounds(quad, sounds) == 1, "quad shot deals fourfold damage with sound");
+#ifdef HARNESS_OPENTDM
+            CHECK(a->client->resp.teamplayerinfo->quad_dealt == 60, "quad damage is recorded");
+#endif
+            h_t23_sample("quad_damage", 0, dealt);
+        }
+        if (i == 1) {
+            int hp = a->health, sounds = h_nsounds;
+            h_hit(a, 15);
+            h_hit(a, 15);
+            h_frames_n(2 * h_rate);
+            h_hit(a, 15);
+            CHECK(a->health == hp && h_count_sounds(invul_sound, sounds) == 1, "invulnerability blocks damage with a two second sound debounce");
+            h_frame();
+            h_hit(a, 15);
+            CHECK(h_count_sounds(invul_sound, sounds) == 2, "protection sound becomes eligible after its debounce");
+        }
+        h_frames_n(start + 58 * h_rate + 1 - h_frames);
+        CHECK(h_stat(a, STAT_TIMER) == 2, "%s has two seconds left", t23_powerups[i].name);
+        h_frames_n(2 * h_rate - 1);
+        CHECK(h_stat(a, STAT_TIMER_ICON) == icon && h_stat(s, STAT_TIMER_ICON) == icon,
+              "%s icon remains through its last active tick", t23_powerups[i].name);
+        h_frame();
+        CHECK(h_stat(a, STAT_TIMER) == 0 && h_stat(a, STAT_TIMER_ICON) == 0 &&
+              !(a->s.effects & t23_powerups[i].effect), "%s expires", t23_powerups[i].name);
+        h_t23_sample(va("expired_%d", i), h_frames - start - 1, h_stat(a, STAT_TIMER_ICON));
+        if (i == 0) {
+            int sounds = h_nsounds, quad = imp_soundindex("items/damage3.wav");
+            CHECK(h_t23_blaster_damage(a, b) == 15 && h_count_sounds(quad, sounds) == 0,
+                  "after expiry blaster damage and sound return to ordinary");
+#ifdef HARNESS_OPENTDM
+            CHECK(a->client->resp.teamplayerinfo->quad_dealt == 60, "ordinary hit does not count toward quad statistics");
+#endif
+        }
+        if (i == 1) {
+            int hp = a->health;
+            h_hit(a, 10);
+            CHECK(a->health < hp, "expired invulnerability no longer blocks damage");
+        }
+    }
+    h_t23_use_powerup(a, 0);
+    int both = h_frames;
+    h_t23_use_powerup(a, 1);
+    h_frame();
+    CHECK(h_stat(a, STAT_TIMER_ICON) == imp_imageindex("p_quad") &&
+          h_stat(a, STAT_TIMER2_ICON) == imp_imageindex("p_invulnerability") &&
+          h_stat(a, STAT_TIMER) == 30 && h_stat(a, STAT_TIMER2) == 30,
+          "quad and invulnerability occupy two timer slots");
+    h_t23_sample("secondary_timer", 0, h_stat(a, STAT_TIMER2));
+    h_frames_n(h_rate);
+    CHECK(h_stat(a, STAT_TIMER2) == 29 && h_stat(s, STAT_TIMER2) == 29 &&
+          h_stat(s, STAT_TIMER2_ICON) == imp_imageindex("p_invulnerability"),
+          "secondary timer decreases for the player and the observer");
+    h_t23_sample("secondary_tick", h_frames - both - 1, h_stat(s, STAT_TIMER2));
+    h_frames_n(both + 30 * h_rate - h_frames);
+    CHECK(h_stat(a, STAT_TIMER2_ICON) && h_stat(s, STAT_TIMER2_ICON), "secondary timer icon persists through the last tick");
+    h_frame();
+    CHECK(!h_stat(a, STAT_TIMER2_ICON) && !h_stat(s, STAT_TIMER2_ICON), "secondary timer clears on both HUDs at expiry");
+}
+
+static void sc_t23_powerup_warning(void)
+{
+    h_set_override("g_timeout_limit", "0");
+    edict_t *a, *b;
+    h_tdm_pair(&a, &b);
+    if (!h_t23_start(a, b)) return;
+    gclient_t *cl = a->client;
+    int *ends[] = { &cl->quad_framenum, &cl->invincible_framenum, &cl->enviro_framenum, &cl->breather_framenum };
+    int air = imp_soundindex("items/airout.wav");
+    for (int i = 0; i < 5; i++) {
+        int power = i % 4;
+        int sound = imp_soundindex(t23_powerups[power].warning);
+        for (int k = 0; k < 4; k++) *ends[k] = 0;
+        int start = h_frames, mark = h_nsounds;
+        *ends[power] = level.framenum + 34 * h_rate / 10;
+        if (i == 4) *ends[2] = *ends[0];
+        h_frames_n(4 * h_rate / 10);
+        CHECK(h_count_sounds(sound, mark) == 0, "powerup %d is quiet before 3 s", i);
+        h_frames_n(h_div);
+        int at = -1, warnings = h_count_sounds(sound, mark);
+        for (int n = mark; n < h_nsounds; n++)
+            if (h_sounds_log[n].soundindex == sound) at = h_sounds_log[n].frame;
+        CHECK(warnings == 1 && at - start == 4 * h_rate / 10, "powerup %d warns once at 3 s", i);
+        CHECK(cl->ps.blend[3] > 0 && (!t23_powerups[power].effect || (a->s.effects & t23_powerups[power].effect)),
+              "powerup %d still shows its effect at the warning threshold", i);
+        h_t23_sample(va("warning_%d", i), at - start, warnings);
+        if (i == 4) {
+            int obscured = h_count_sounds(air, mark);
+            CHECK(obscured == 0, "quad suppresses the simultaneous enviro warning");
+            h_t23_sample("enviro_under_quad", 0, obscured);
+        }
+        h_frames_n(5 * h_rate / 10);
+        CHECK(cl->ps.blend[3] == 0, "powerup %d reaches an off phase in the last 3 s", i);
+        h_frames_n(start + 34 * h_rate / 10 + 1 - h_frames);
+        CHECK(h_count_sounds(sound, mark) == 1 && (i != 4 || h_count_sounds(air, mark) == 0),
+              "powerup %d has no additional warnings through natural expiry", i);
+
+#ifdef HARNESS_OPENTDM
+        *ends[power] = level.framenum + 3 * h_rate;
+        if (i == 4) *ends[2] = *ends[0];
+        mark = h_nsounds;
+        start = h_frames;
+        h_client_command(a, "time");
+        h_frames_n(4 * h_rate);
+        int during = h_count_sounds(sound, mark);
+        CHECK(tdm_match_status == MM_TIMEOUT && during == 0 &&
+              h_stat(a, STAT_TIMER_ICON) == imp_imageindex(t23_powerups[power].icon) &&
+              cl->ps.blend[3] > 0, "powerup %d stays active and quiet past its wall-time deadline", i);
+        h_t23_sample(va("silent_%d", i), h_frames - start, during);
+        h_view_resume(a);
+        h_frames_n(h_div);
+        CHECK(h_count_sounds(sound, mark) <= 1, "coincident warning and timeout limits powerup %d to one sound", i);
+#endif
+    }
+}
+
+#ifdef HARNESS_OPENTDM
+static int h_t23_statusbar(edict_t *p, int from)
+{
+    int at = -1, count = 0;
+    for (int i = from; i < h_nmsgs; i++)
+        if (h_msgs[i].svc == H_SVC_CONFIGSTRING && h_msgs[i].sub == CS_STATUSBAR &&
+            h_msgs[i].entnum == NUM(p)) {
+            if (!count++) at = h_msgs[i].frame;
+        }
+    CHECK(count <= 1, "statusbar update is unique since observation %d (got %d)", from, count);
+    return at;
+}
+
+#endif
+static void sc_t23_item_hud(void)
+{
+    h_set_override("g_tdmflags", "0");
+    h_set_override("g_1v1flags", "0");
+    h_scene_base();
+    h_ent("{\n\"classname\" \"info_player_deathmatch\"\n\"origin\" \"300 0 24\"\n}\n");
+    h_ent("{\n\"classname\" \"ammo_grenades\"\n\"origin\" \"0 1000 40\"\n}\n");
+    h_ent("{\n\"classname\" \"weapon_railgun\"\n\"origin\" \"0 1100 40\"\n}\n");
+    h_start(h_ents);
+    edict_t *p = h_join(0, "p1"), *b = h_join(1, "p2");
+    h_frames_n(3 * h_rate);
+    if (!h_t23_start(p, b)) return;
+    h_give(p, "machinegun", 0);
+    h_give(p, "bullets", 20);
+    h_client_command(p, "use machinegun");
+    h_frames_n(3 * h_rate);
+    edict_t *grenades = h_t23_item("ammo_grenades"), *railgun = h_t23_item("weapon_railgun");
+    if (!grenades || !railgun) return;
+    int start;
+#ifdef HARNESS_OPENTDM
+    int mark = h_nmsgs;
+    start = h_frames;
+#endif
+    int grenade_index = ITEM_INDEX(grenades->item), rail_index = ITEM_INDEX(railgun->item);
+    grenades->touch(grenades, p, NULL, NULL);
+    CHECK(h_stat(p, STAT_PICKUP_STRING) == CS_ITEMS + grenade_index, "grenade pickup is shown");
+#ifdef HARNESS_OPENTDM
+    h_frames_n(h_rate);
+    CHECK(h_t23_statusbar(p, mark) < 0, "no statusbar before the first second");
+    h_frame();
+    int first = h_t23_statusbar(p, mark);
+    CHECK(first == start + h_rate, "grenade pickup updates statusbar after one second");
+    h_t23_sample("grenade_pickup", first - start, first >= 0);
+    mark = h_nmsgs;
+#endif
+    h_client_command(p, "drop grenades");
+    CHECK(p->client->inventory[grenade_index] == 0, "drop removes grenades");
+#ifdef HARNESS_OPENTDM
+    h_frames_n(start + 3 * h_rate - h_frames);
+    CHECK(h_t23_statusbar(p, mark) < 0, "drop statusbar waits for the two second cooldown");
+    h_frame();
+    int second = h_t23_statusbar(p, mark);
+    CHECK(second == first + 2 * h_rate, "drop statusbar on the first eligible step");
+    h_t23_sample("grenade_drop", second - first, second >= 0);
+#endif
+
+    h_give(p, "quad damage", 0);
+    start = h_frames;
+#ifdef HARNESS_OPENTDM
+    mark = h_nmsgs;
+#endif
+    railgun->touch(railgun, p, NULL, NULL);
+#ifdef HARNESS_OPENTDM
+    h_client_command(p, "armortimer");
+    h_client_command(p, "weapontimer");
+    h_frame();
+    CHECK(h_stat(p, STAT_TIMER) == 20 && h_stat(p, STAT_TIMER2) == 30 &&
+          h_stat(p, STAT_TIMER_ICON) == imp_imageindex("i_combatarmor") &&
+          h_stat(p, STAT_TIMER2_ICON) == imp_imageindex("w_blaster"), "manual armor and weapon HUD timers");
+#endif
+    h_client_command(p, "use quad damage");
+    h_frame();
+    CHECK(h_stat(p, STAT_TIMER_ICON) == imp_imageindex("p_quad"), "quad takes precedence over armor icon");
+    h_frames_n(start + 3 * h_rate + 1 - h_frames);
+    CHECK(h_stat(p, STAT_PICKUP_STRING) == CS_ITEMS + rail_index, "pickup HUD persists through three seconds");
+#ifdef HARNESS_OPENTDM
+    int third = h_t23_statusbar(p, mark);
+    CHECK(third == second + 2 * h_rate, "weapon pickup updates after the statusbar cooldown");
+    h_t23_sample("weapon_pickup", third - second, third >= 0);
+#endif
+    h_frame();
+    CHECK(h_stat(p, STAT_PICKUP_STRING) == 0 && h_stat(p, STAT_PICKUP_ICON) == 0, "pickup HUD clears on the next step");
+    h_t23_sample("pickup_hud_clear", h_frames - start - 1, h_stat(p, STAT_PICKUP_ICON));
+#ifdef HARNESS_OPENTDM
+    int drop = h_frames;
+    mark = h_nmsgs;
+#endif
+    h_client_command(p, "drop railgun");
+    h_frames_n(2 * h_rate);
+    CHECK(!p->client->inventory[rail_index], "weapon drop removes inventory");
+#ifdef HARNESS_OPENTDM
+    int update = h_t23_statusbar(p, mark);
+    CHECK(update == drop + h_rate,
+          "weapon drop updates statusbar exactly one second later");
+    h_t23_sample("weapon_drop", update - drop, update >= 0);
+#endif
+}
+
+static void sc_t23_power_armor(void)
+{
+    static const struct { const char *name; int effect; } armor[] = {
+        { "power screen", EF_POWERSCREEN },
+        { "power shield", EF_COLOR_SHELL },
+    };
+    h_scene_base();
+    h_start(h_ents);
+    edict_t *p = h_join(0, "p1");
+    h_give(p, "body armor", 0);
+    h_give(p, "cells", 50);
+    int cell_index = ITEM_INDEX(FindItem("cells"));
+    for (unsigned i = 0; i < sizeof(armor) / sizeof(armor[0]); i++) {
+        h_give(p, armor[i].name, 0);
+        if (!(p->flags & FL_POWER_ARMOR)) h_client_command(p, va("use %s", armor[i].name));
+        int phase = level.framenum % (16 * h_div);
+        h_frames_n((16 * h_div - phase) % (16 * h_div));
+        vec3_t ahead, point, zero = { 0, 0, 0 };
+        AngleVectors(p->s.angles, ahead, NULL, NULL);
+        VectorMA(p->s.origin, 16, ahead, point);
+        int initial = p->client->inventory[cell_index], start = h_frames;
+        T_Damage(p, world, world, zero, point, zero, 18, 0, 0, MOD_TRIGGER_HURT);
+        h_frames_n(h_rate / 5);
+        int cells = p->client->inventory[cell_index];
+        CHECK(cells == initial - 6 && (p->s.effects & armor[i].effect), "%s consumes six cells and its effect lasts through 0.2 s", armor[i].name);
+        h_t23_sample(va("active_%d", i), h_frames - start - 1, cells);
+        for (int phase = 2; phase <= 8; phase++) {
+            h_frame();
+            CHECK(!(p->s.effects & armor[i].effect), "%s effect clears at 0.2 s", armor[i].name);
+            int want = imp_imageindex(phase & 8 ? "i_powershield" : "i_bodyarmor");
+            CHECK(h_stat(p, STAT_ARMOR_ICON) == want, "armor HUD alternates on 100 ms phases");
+            h_t23_sample(va("icon_%d_%d", i, phase), h_frames - start - 1, h_stat(p, STAT_ARMOR_ICON));
+            h_frames_n(h_div - 1);
+        }
+    }
+}
+
+static void h_t23_view_feedback(edict_t *p)
+{
+    h_real_phase(1 % h_div);
+    int start = h_frames, sounds = h_nsounds, hp = h_hp_now(p);
+    int next = 0, first = -1, flash_ticks = 0;
+    float peak = 0;
+    for (int tick = 0; tick < 3 * h_div; tick++) {
+        for (; next < 5 && next * h_div / 5 == tick; next++) h_hit(p, 5);
+        h_frame();
+        if (h_stat(p, STAT_FLASHES)) {
+            if (first < 0) first = h_frames - 1;
+            flash_ticks++;
+        }
+        if (p->client->ps.blend[3] > peak) peak = p->client->ps.blend[3];
+    }
+    int dealt = hp - h_hp_now(p), pain = h_count_prefix("*pain", sounds);
+    CHECK(dealt == 25 && pain == 1, "five hits in one window deal 25 and play one pain sound");
+    CHECK(flash_ticks == h_div && fabsf(peak - 0.25f) < 0.001f, "flash holds 100 ms and peak blend is 0.25");
+    h_t23_sample("flash", first - start, dealt);
+    h_t23_sample("flash_length", flash_ticks, pain);
+    h_t23_sample("damage_peak", 0, lroundf(1000 * peak));
+    for (int i = 0; i < 3; i++) {
+        h_t23_sample(va("damage_blend_%d", i), i * h_div, lroundf(1000 * p->client->ps.blend[3]));
+        h_frames_n(h_div);
+    }
+    sounds = h_nsounds;
+    h_hit(p, 10);
+    h_frames_n(h_div);
+    CHECK(h_count_prefix("*pain", sounds) == 0, "debounce suppresses pain in the next damage window");
+    h_t23_sample("protected_pain", 0, h_count_prefix("*pain", sounds));
+    h_frames_n(h_rate);
+    edict_t *pickup = Drop_Item(world, FindItem("Shells"));
+    pickup->touch(pickup, p, NULL, NULL);
+    for (int i = 0; i < 4; i++) {
+        h_frame();
+        float blend = p->client->ps.blend[3];
+        CHECK(fabsf(blend - fmaxf(0, 0.25f - 0.1f * i)) < H_EPS,
+              "pickup blend decays by elapsed game time at sample %d (%.3f)", i, blend);
+        h_t23_sample(va("pickup_blend_%d", i), i * h_div, lroundf(1000 * blend));
+        h_frames_n(h_div - 1);
+    }
+}
+
+static void h_t23_view_bob(edict_t *p)
+{
+    static const struct { int speed; float advance; } steps[] = {
+        { 80, 0.3125f }, { 180, 0.625f }, { 300, 1.25f },
+    };
+    for (unsigned i = 0; i < sizeof(steps) / sizeof(steps[0]); i++) {
+        VectorClear(p->velocity);
+        h_frame();
+        h_real_phase(0);
+        VectorSet(p->velocity, steps[i].speed, 0, 0);
+        for (int tick = 0; tick < h_rate / 2; tick++) {
+            p->groundentity = world;
+            h_frame();
+        }
+        float bob = p->client->bobtime;
+        CHECK(fabsf(bob - steps[i].advance) < H_EPS, "half a second at speed %d advances bob to %.4f", steps[i].speed, bob);
+        h_t23_sample(va("run_bob_%d", i), h_rate / 2, lroundf(10000 * bob));
+    }
+    float hold = p->client->bobtime;
+    for (int i = 0; i < h_rate / 2; i++) {
+        p->groundentity = NULL;
+        h_frame();
+    }
+    CHECK(p->client->bobtime == hold, "airborne bob preserves the running phase");
+    h_t23_sample("air_bob", h_rate / 2, lroundf(1000 * p->client->bobtime));
+    VectorClear(p->velocity);
+    p->groundentity = world;
+    h_frames_n(h_rate);
+}
+
+static void h_t23_view_turn(edict_t *p)
+{
+    gclient_t *cl = p->client;
+    h_real_phase(0);
+    float yaw = cl->ps.viewangles[YAW] + 12;
+    cl->ps.viewangles[YAW] = cl->v_angle[YAW] = yaw;
+    h_frame();
+    CHECK(fabsf(cl->ps.gunangles[YAW] + 2.4f) < 0.001f && cl->oldviewangles[YAW] == yaw,
+          "12 degree turn is shown with 2.4 degrees of gun sway");
+    CHECK(VectorCompare(cl->ps.gunoffset, vec3_origin), "default gun offset is zero");
+    int start = h_frames - 1;
+    h_t23_sample("turn_before_pause", 0, lroundf(1000 * cl->ps.gunangles[YAW]));
+    for (int i = 1; i < h_div; i++) {
+        cl->ps.viewangles[YAW] = cl->v_angle[YAW] = yaw + i;
+        h_frame();
+        CHECK(fabsf(cl->ps.gunangles[YAW] + 2.4f) < H_EPS && cl->oldviewangles[YAW] == yaw,
+              "changing input leaves gun angle and history held until presentation");
+    }
+    cl->ps.viewangles[YAW] = cl->v_angle[YAW] = yaw;
+#ifdef HARNESS_OPENTDM
+    h_view_pause(p);
+    h_t23_sample("pause_entry", h_frames - start, lroundf(1000 * cl->ps.gunangles[YAW]));
+    start = h_frames;
+    for (int i = 0; i < 5; i++) {
+        h_frame();
+        CHECK(fabsf(cl->ps.gunangles[YAW]) < H_EPS,
+              "pre-pause sway clears at presentation step %d (yaw %.3f)", i, cl->ps.gunangles[YAW]);
+        h_t23_sample(va("pause_yaw_%d", i), h_frames - start - 1, lroundf(1000 * cl->ps.gunangles[YAW]));
+        h_frames_n(h_div - 1);
+    }
+    h_t23_sample("before_resume", 0, lroundf(1000 * cl->ps.gunangles[YAW]));
+    h_view_resume(p);
+    start = h_frames - 1;
+    for (int i = 0; i < 2; i++) {
+        CHECK(fabsf(cl->ps.gunangles[YAW]) < H_EPS, "no stale gun sway around Fight! (sample %d)", i);
+        h_t23_sample(va("resume_yaw_%d", i), h_frames - start - 1, lroundf(1000 * cl->ps.gunangles[YAW]));
+        h_frames_n(h_div);
+    }
+#else
+    h_frame();
+    CHECK(fabsf(cl->ps.gunangles[YAW]) < H_EPS, "turn sway clears at the next active presentation step");
+    h_t23_sample("turn_cleared", h_frames - start - 1, lroundf(1000 * cl->ps.gunangles[YAW]));
+#endif
+}
+
+static void sc_t23_view_batches(void)
+{
+#ifdef HARNESS_OPENTDM
+    edict_t *a = h_view_player();
+    if (!a) return;
+#else
+    edict_t *a, *b;
+    h_tdm_pair(&a, &b);
+    if (!h_t23_start(a, b)) return;
+    h_place(a, -800, 0, 24);
+    h_tick(a, 0, 1);
+    h_frames_n(h_rate);
+#endif
+    h_t23_view_feedback(a);
+    h_t23_view_bob(a);
+    h_t23_view_turn(a);
+    h_real_phase(0);
+#ifdef HARNESS_OPENTDM
+    a->client->kick_angles_final[PITCH] = -1;
+    a->client->kick_origin_start = 0;
+    a->client->kick_origin_end = h_div;
+#else
+    a->client->kick_angles[PITCH] = -1;
+#endif
+    int held = 0;
+    for (int i = 0; i < 2 * h_div; i++) {
+        h_frame();
+        held += a->client->ps.kick_angles[PITCH] == -1;
+    }
+    CHECK(held == h_div && a->client->ps.kick_angles[PITCH] == 0, "ordinary weapon kick holds one presentation window");
+    h_t23_sample("weapon_kick", held, held > 0);
+}
+
+static void sc_t23_lava_slime(void)
+{
+    edict_t *p, *b;
+    h_tdm_pair(&p, &b);
+    if (!h_t23_start(p, b)) return;
+#ifdef HARNESS_OPENTDM
+    int sound[] = { imp_soundindex("player/burn2.wav"), imp_soundindex("player/burn1.wav") };
+#else
+    int sound[] = { imp_soundindex("player/burn1.wav"), imp_soundindex("player/burn2.wav") };
+#endif
+    for (int phase = 0; phase < h_div; phase++) {
+        for (int medium = 0; medium < 2; medium++) {
+            for (int shield = 0; shield < 2; shield++) {
+                p->waterlevel = 0;
+                p->client->enviro_framenum = 0;
+                h_frames_n(2 * h_rate);
+                h_real_phase(phase);
+                p->health = 100;
+                p->pain_debounce_framenum = 0;
+#ifdef HARNESS_OPENTDM
+                p->client->ps.gunframe = 9;
+                b->client->ps.gunframe = 9;
+#else
+                p->client->weaponframe = 9;
+                b->client->weaponframe = 9;
+#endif
+                h_t23_seed(shield);
+                p->waterlevel = 1;
+                p->watertype = medium ? CONTENTS_SLIME : CONTENTS_LAVA;
+                if (shield) p->client->enviro_framenum = level.framenum + 3 * h_rate;
+                int start = h_frames, mark = h_nsounds, hits = 0, prev = -1;
+                for (int t = 0; t < h_rate; t++) {
+                    int hp = p->health;
+                    h_frame();
+                    if (hp > p->health) {
+                        if (prev >= 0) CHECK(t - prev == h_div, "medium %d hits are 100 ms apart", medium);
+                        prev = t;
+                        hits++;
+                    }
+                }
+                int wanted = medium ? (shield ? 0 : 1) : (shield ? 1 : 3);
+                CHECK(p->health == 100 - 10 * wanted && hits == (wanted ? 10 : 0),
+                      "medium %d protection %d phase %d: %d hits, %d damage", medium, shield, phase, hits, 100 - p->health);
+                int burns = h_count_prefix("player/burn", mark);
+                CHECK(burns == !medium && (medium || h_count_sounds(sound[shield], mark) == 1),
+                      "medium %d protection %d phase %d: deterministic burn and one-second debounce", medium, shield, phase);
+                if (!phase) {
+                    h_t23_sample(va("damage_%d_%d", medium, shield), h_frames - start, 100 - p->health);
+                    h_t23_sample(va("burn_%d_%d", medium, shield), 0, burns);
+                }
+                if (!medium) {
+                    CHECK(h_sounds_log[mark].frame == start, "lava burns audibly on entry");
+                    h_frame();
+                    CHECK(h_count_prefix("player/burn", mark) == 2 &&
+                          h_sounds_log[h_nsounds - 1].frame == start + h_rate,
+                          "next burn sound is allowed after exactly one second");
+                    if (!phase) h_t23_sample(va("burn_again_%d", shield), h_frames - start - 1, 2);
+                }
+            }
+        }
+    }
+#ifdef HARNESS_OPENTDM
+    for (int medium = 0; medium < 2; medium++) {
+        p->waterlevel = 1;
+        p->watertype = medium ? CONTENTS_SLIME : CONTENTS_LAVA;
+        p->client->enviro_framenum = 0;
+        if (!medium) h_client_command(p, "time");
+        int hp = p->health, sounds = h_nsounds;
+        h_frames_n(2 * h_rate);
+        CHECK(tdm_match_status == MM_TIMEOUT && p->health == hp && h_count_prefix("player/burn", sounds) == 0,
+              "medium %d is harmless and silent in timeout", medium);
+        h_t23_sample(va("paused_medium_%d", medium), 2 * h_rate, hp - p->health);
+    }
+#endif
+}
+
+static void sc_t23_drowning(void)
+{
+    h_scene_base();
+    h_start(h_ents);
+    edict_t *p = h_join(0, "p1");
+    h_frames_n(h_rate);
+    p->health = 100;
+    p->waterlevel = 3;
+    p->watertype = CONTENTS_WATER;
+    int start = h_frames, mark = h_nsounds, hits = 0, previous = -1;
+    for (int t = 0; t < 15 * h_rate; t++) {
+        int hp = p->health;
+        h_frame();
+        if (p->health >= hp) continue;
+        int gap = previous < 0 ? t : t - previous;
+        int want = previous < 0 ? 12 * h_rate : 11 * h_rate / 10;
+        CHECK(gap == want, "drown hit %d after %d steps (expected %d)", hits + 1, gap, want);
+        previous = t;
+        CHECK(hp - p->health == 4 + 2 * hits, "drown hit %d deals %d", hits + 1, hp - p->health);
+        h_t23_sample(va("drown_%d", hits), h_frames - start - 1, hp - p->health);
+        hits++;
+    }
+    CHECK(hits == 3 && h_count_prefix("*gurp", mark) == 3 && h_count_prefix("*pain", mark) == 0,
+          "three gulp sounds and no double pain after air expires");
+    p->waterlevel = 0;
+    h_frame();
+    CHECK(h_count_prefix("player/gasp1.wav", mark) == 1, "surfacing after running out of air gasps loudly");
+    p->waterlevel = 3;
+    h_frames_n(2 * h_rate);
+    p->waterlevel = 0;
+    h_frame();
+    CHECK(h_count_prefix("player/gasp2.wav", mark) == 1, "surfacing before air expires uses normal gasp");
+    p->waterlevel = 3;
+    start = h_frames;
+    int fresh_health = p->health;
+    for (int i = 0; i < 12 * h_rate; i++) {
+        h_frame();
+        if (p->health != fresh_health) break;
+    }
+    CHECK(h_frames == start + 12 * h_rate && p->health == fresh_health,
+          "surfacing replenishes the full twelve seconds of air");
+    h_frame();
+    CHECK(fresh_health - p->health == 4, "the renewed air supply ends with a fresh four-point hit");
+    h_t23_sample("renewed_air", h_frames - start - 1, fresh_health - p->health);
+    mark = h_nsounds;
+    int last_drown = h_frames - 1;
+    h_frames_n(h_div - 1);
+#ifdef HARNESS_OPENTDM
+    h_real_phase(0);
+#endif
+    h_hit(p, 1);
+    h_frame();
+#ifndef HARNESS_OPENTDM
+    /* OpenFFA excludes the debounce deadline itself and processes pain on keyframes. */
+    CHECK(!h_count_prefix("*pain", mark), "the first keyframe after drowning suppresses ordinary pain");
+    h_frames_n(2 * h_div - last_drown % h_div - (h_frames - last_drown));
+    h_hit(p, 1);
+    h_frame();
+#endif
+    CHECK(h_count_prefix("*pain", mark) == 1, "ordinary pain returns on the first eligible keyframe after drowning");
+    h_t23_sample("drown_pain_returns", h_frames - last_drown - 1, h_count_prefix("*pain", mark));
+
+    h_t23_use_powerup(p, 3);
+    p->waterlevel = 3;
+    mark = h_nsounds;
+    start = h_frames;
+    h_frames_n(5 * h_rate + 1);
+    int breaths = 0;
+    for (int i = mark; i < h_nsounds; i++) {
+        const hsound_t *sound = &h_sounds_log[i];
+        if (strncmp(h_sounds[sound->soundindex], "player/u_breath", strlen("player/u_breath"))) continue;
+        int at = sound->frame - start;
+        CHECK(at == breaths * 5 * h_rate / 2, "breath %d at %d steps", breaths, at);
+        h_t23_sample(va("breath_%d", breaths++), at, 1);
+    }
+    CHECK(breaths == 3, "rebreather sounds at 0, 2.5 and 5 seconds");
+    h_t23_sample("breaths", 5 * h_rate, breaths);
+    p->client->breather_framenum = 0;
+    start = h_frames;
+    int hp = p->health;
+    h_frames_n(10 * h_rate);
+    CHECK(p->health == hp, "last assisted breath provides ten seconds of air");
+    h_frame();
+    CHECK(p->health < hp, "air runs out ten seconds after rebreather stops");
+    h_t23_sample("assisted_air", h_frames - start - 1, hp - p->health);
+}
+
+static void h_t23_animation(edict_t *p, const char *tag, int frames, int first)
+{
+    int start = h_frames, prev = p->s.frame, last = -1, n = 0;
+    for (int i = 0; i < frames; i++) {
+        h_frame();
+        if (p->s.frame == prev) continue;
+        CHECK(i == (last >= 0 ? last + h_div : first), "%s animation change %d at step %d", tag, n, i);
+        last = i;
+        prev = p->s.frame;
+        h_t23_sample(va("%s_%d", tag, n), h_frames - start - 1, prev);
+        n++;
+    }
+    CHECK(n == frames / h_div, "%s displays %d animation frames (got %d)", tag, frames / h_div, n);
+}
+
+static void sc_t23_player_animation(void)
+{
+    h_scene_base();
+    h_start(h_ents);
+    edict_t *p = h_join(0, "p1");
+    h_frames_n(2 * h_rate);
+    int idle = p->s.frame;
+    for (int i = 0; i < h_div && p->s.frame == idle; i++) h_frame();
+    CHECK(p->s.frame != idle, "standing animation gives a reference step before running");
+    p->groundentity = world;
+    VectorSet(p->velocity, 180, 0, 0);
+    h_t23_animation(p, "run", 5 * h_div, h_div - 1);
+    VectorClear(p->velocity);
+    h_frames_n(h_rate);
+    h_real_phase(1 % h_div);
+    CHECK(h_t23_print(p, "wave 1", "salute"), "wave dispatch accepted between animation steps");
+#ifdef HARNESS_OPENTDM
+    h_t23_animation(p, "salute", 12 * h_div, 0);
+#else
+    h_t23_animation(p, "salute", 12 * h_div, h_div - 1);
+#endif
+    CHECK(p->client->anim_priority == ANIM_BASIC, "salute returns to idle after its last frame");
+}
+
+static void h_t23_spawn_boundary(edict_t *p, edict_t *other, int boundary, const char *tag)
+{
+    CHECK(level.numspawns == 2, "spawn test needs precisely two spots");
+    if (level.numspawns != 2) return;
+    edict_t *occupied = level.spawns[0], *free = level.spawns[1];
+    h_place(p, -600, 0, 24);
+    h_tick(p, 0, 1);
+    h_place(other, occupied->s.origin[0], occupied->s.origin[1], 24);
+    h_tick(other, 0, 1);
+    h_frames_n(boundary - h_frames - 1);
+    int solid = other->solid;
+    other->solid = SOLID_NOT;
+    gi.linkentity(other);
+    unsigned seed = 0;
+    do {
+        h_t23_seed(seed++);
+#ifdef HARNESS_OPENTDM
+    } while (genrand_uniform(2) != 0);
+#else
+    } while (Q_rand_uniform(2) != 0);
+#endif
+    h_t23_seed(seed - 1);
+#ifdef HARNESS_OPENTDM
+    respawn(p);
+#else
+    PutClientInServer(p);
+#endif
+    int before = fabsf(p->s.origin[0] - free->s.origin[0]) < H_EPS;
+    CHECK(before, "respawn avoids occupied spot before %s boundary", tag);
+    h_frame();
+    h_place(p, -600, 0, 24);
+    h_think(p, 0, 10);
+    h_t23_seed(seed - 1);
+#ifdef HARNESS_OPENTDM
+    respawn(p);
+#else
+    PutClientInServer(p);
+#endif
+    int after = fabsf(p->s.origin[0] - occupied->s.origin[0]) < H_EPS;
+    CHECK(after, "seeded random respawn mode returns at %s boundary", tag);
+    h_t23_sample(tag, 0, before + after);
+    other->solid = solid;
+    h_place(other, 800, 0, 24);
+    h_think(other, 0, 10);
+}
+
+static void sc_t23_respawn(void)
+{
+    char flags[16];
+    snprintf(flags, sizeof(flags), "%d", DF_FORCE_RESPAWN);
+#ifdef HARNESS_OPENTDM
+    h_set_override("g_tdmflags", flags);
+    h_set_override("g_1v1flags", flags);
+    h_set_override("g_respawn_time", "3");
+    const int kill_wait = 1;
+#else
+    h_set_override("dmflags", flags);
+    const int kill_wait = 0;
+#endif
+    edict_t *a, *b;
+    h_tdm_pair(&a, &b);
+#ifdef HARNESS_OPENTDM
+    CHECK(tdm_match_status == MM_WARMUP, "map opens in warmup");
+    h_t23_spawn_boundary(a, b, 5 * h_rate, "warmup_spawn");
+    int prints = h_nbprints, fight = -1;
+    if (!h_tdm_start(a, b)) return;
+    CHECK(h_t23_announcements("Fight!", prints, &fight) == 1, "one Fight announcement anchors match spawn");
+    h_t23_spawn_boundary(a, b, fight + h_rate, "match_spawn");
+#else
+    if (!h_t23_start(a, b)) return;
+    h_t23_spawn_boundary(a, b, 5 * h_rate, "map_start_spawn");
+#endif
+    h_place(b, 800, 0, 24);
+    h_tick(b, 0, 1);
+    int start = h_frames;
+    h_hit(a, 200);
+    h_frames_n(h_rate);
+    h_think(a, BUTTON_ATTACK, 10);
+    h_frame();
+    CHECK(a->deadflag, "manual respawn waits through the one-second boundary");
+    h_think(a, 0, 10);
+    h_frame();
+    CHECK(!a->deadflag && a->health > 0, "manual respawn on the first allowed tick");
+    h_t23_sample("manual_spawn", h_frames - start - 1, a->health);
+    start = h_frames - kill_wait;
+    h_frames_n(5 * h_rate - 2);
+    h_client_command(a, "kill");
+    CHECK(!a->deadflag, "kill rejected one tick before five seconds from respawn");
+    h_frame();
+    h_client_command(a, "kill");
+    CHECK(a->deadflag, "kill accepted at five seconds from respawn");
+    h_t23_sample("kill_after_spawn", h_frames - start, !!a->deadflag);
+    start = h_frames;
+    h_frames_n(3 * h_rate + 1);
+    CHECK(a->deadflag, "forced respawn waits through its deadline");
+    h_frame();
+    CHECK(!a->deadflag && a->health > 0, "forced respawn on first allowed tick");
+    h_t23_sample("forced_spawn", h_frames - start - 1, a->health);
+}
+
+static void sc_t23_weapon_pain(void)
+{
+    static const struct { const char *name; int state, gunframe; } cases[] = {
+        { "rocket launcher", WEAPON_READY, 13 },
+        { "grenades", WEAPON_READY, 16 },
+        { "machinegun", WEAPON_FIRING, 4 },
+        { "hyperblaster", WEAPON_FIRING, 6 },
+        { "chaingun", WEAPON_FIRING, 5 },
+    };
+    h_scene_base();
+    h_start(h_ents);
+    edict_t *p = h_join(0, "p1");
+    h_frames_n(h_rate);
+    int sound = imp_soundindex("weapons/noammo.wav");
+    for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        gitem_t *weapon = (gitem_t *)FindItem((char *)cases[i].name);
+        if (!weapon) imp_error("missing weapon %s", cases[i].name);
+#ifdef HARNESS_OPENTDM
+        h_frames_n(p->client->next_weapon_think - level.framenum);
+#else
+        h_real_phase(0);
+#endif
+        int start = h_frames, sounds = h_nsounds, msgs = h_nmsgs;
+#ifdef HARNESS_OPENTDM
+        int ammo = weapon->ammoindex;
+#else
+        int ammo = ITEM_INDEX(weapon->ammo ? FindItem(weapon->ammo) : weapon);
+#endif
+        for (int attempt = 0; attempt < 3; attempt++) {
+            p->client->inventory[ammo] = 0;
+            p->client->weapon = weapon;
+            p->client->newweapon = NULL;
+            p->client->ammo_index = ammo;
+            p->client->weaponstate = cases[i].state;
+#ifdef HARNESS_OPENTDM
+            p->client->ps.gunframe = cases[i].gunframe;
+#else
+            p->client->weaponframe = cases[i].gunframe;
+#endif
+            if (attempt == 1) {
+                /* Probe the exact pre-deadline world step between weapon steps. */
+                p->client->buttons = BUTTON_ATTACK;
+                weapon->weaponthink(p);
+                p->client->buttons = 0;
+            } else {
+                h_think(p, BUTTON_ATTACK, 10);
+                h_think(p, 0, 10);
+            }
+            int clicks = h_count_sounds(sound, sounds);
+            CHECK(clicks == 1 + (attempt == 2), "%s attempt %d hears %d no-ammo sounds", weapon->pickup_name, attempt, clicks);
+            CHECK(!h_count_msgs(H_SVC_MUZZLEFLASH, -1, msgs) && p->client->inventory[ammo] == 0,
+                  "%s does not fire or consume ammo when empty", weapon->pickup_name);
+            if (!attempt) h_frames_n(h_rate - 1);
+            if (attempt == 1) {
+                if (h_div == 1) p->client->weapon_thunk = true;
+                h_frame();
+            }
+        }
+        h_t23_sample(va("noammo_%d", i), h_frames - start, h_count_sounds(sound, sounds));
+        h_frames_n(2 * h_rate);
+    }
+}
+
+static void sc_t23_map_animations(void)
+{
+    static const struct { const char *name; int delay, period; } animations[] = {
+        { "misc_blackhole", 2, 19 },
+        { "misc_eastertank", 2, 39 },
+        { "misc_easterchick", 2, 39 },
+        { "misc_easterchick2", 2, 39 },
+        { "misc_banner", 1, 16 },
+        { "misc_satellite_dish", 1, 0 },
+    };
+    enum { count = sizeof(animations) / sizeof(animations[0]) };
+    h_scene_base();
+    for (int i = 0; i < count; i++)
+        h_ent("{\n\"classname\" \"%s\"\n\"origin\" \"%d 1000 40\"\n}\n", animations[i].name, 160 * i);
+    h_start(h_ents);
+    edict_t *ent[count];
+    int initial[count], changes[count] = { 0 };
+    for (int i = 0; i < count; i++) {
+        ent[i] = h_by_class(animations[i].name, 0);
+        if (!ent[i]) imp_error("missing %s", animations[i].name);
+        initial[i] = ent[i]->s.frame;
+    }
+    ent[count - 1]->use(ent[count - 1], world, world);
+    int valid = 1;
+    for (int tick = 0; tick <= 42 * h_div; tick++) {
+        int before[count];
+        for (int i = 0; i < count; i++) before[i] = ent[i]->s.frame;
+        h_frame();
+        for (int i = 0; i < count; i++) {
+            int advance = ent[i]->s.frame != before[i];
+            int n = tick / h_div - animations[i].delay + 1;
+            int period = animations[i].period;
+            int wanted = n > 0 && !(tick % h_div) && (period || n <= 38);
+            if (advance != wanted) valid = 0;
+            if (!advance) continue;
+            changes[i]++;
+            int frame = period == 16 ? (ent[i]->s.frame - initial[i] + 16) % 16 :
+                        ent[i]->s.frame - initial[i];
+            if (frame != (period ? n % period : n)) valid = 0;
+            if (n == 1 || n == period || n == 38)
+                h_t23_sample(va("%s_%d", animations[i].name, n), tick, frame);
+        }
+    }
+    CHECK(valid && changes[count - 1] == 38, "map model frames advance, loop or stop at their scheduled times");
+}
+
+static void h_t23_gib_lifetimes(const char *const *map_gibs, unsigned seed)
+{
+    int count = map_gibs ? 6 : 3;
+    int gone[6] = { 0 }, lifetime[6] = { 0, 0, 0, 30 * h_rate, 30 * h_rate, 30 * h_rate };
+    h_t23_seed(seed);
+    // Each lifetime draw follows the position, velocity and spin draws.
+    const int prior_draws[] = { 9, 4, 6 };
+#ifdef HARNESS_OPENTDM
+    const int spawned = 3;
+#else
+    const int spawned = 2; /* OpenFFA has no ThrowDebris. */
+    if (!map_gibs) count = spawned;
+#endif
+    for (int i = 0; i < spawned; i++) {
+        for (int draw = 0; draw < prior_draws[i]; draw++) {
+#ifdef HARNESS_OPENTDM
+            genrand_int32();
+#else
+            Q_rand();
+#endif
+        }
+        int base = i < 2 ? 10 : 5;
+        lifetime[i] = (int)((base + base * random()) * h_rate);
+    }
+    edict_t *head = G_Spawn();
+    VectorSet(head->s.origin, 0, 1000, 100);
+    h_t23_seed(seed);
+#ifdef HARNESS_OPENTDM
+    ThrowGib(head, "models/objects/gibs/sm_meat/tris.md2", 40, GIB_ORGANIC);
+    ThrowHead(head, "models/objects/gibs/skull/tris.md2", 40, GIB_ORGANIC);
+    ThrowDebris(head, "models/objects/debris1/tris.md2", 1, head->s.origin);
+    edict_t *ent[6] = { h_by_class("noclass", 1), head, h_by_class("debris", 0) };
+#else
+    ThrowGib(head, imp_modelindex("models/objects/gibs/sm_meat/tris.md2"), 40, GIB_ORGANIC);
+    ThrowHead(head, imp_modelindex("models/objects/gibs/skull/tris.md2"), 40, GIB_ORGANIC);
+    edict_t *ent[6] = { h_by_class("noclass", 1), head };
+#endif
+    for (int i = 3; i < count; i++) ent[i] = h_by_class(map_gibs[i - 3], 0);
+    for (int i = 0; i < count; i++) {
+        if (i >= spawned && i < 3) continue;
+        if (!ent[i] || ent[i]->think != G_FreeEdict) imp_error("missing gib/debris fixture %d", i);
+        ent[i]->movetype = MOVETYPE_NONE;
+    }
+    int start = h_frames;
+    for (int tick = 0; tick < (map_gibs ? 31 : 21) * h_rate; tick++) {
+        h_frame();
+        for (int i = 0; i < count; i++)
+            if (ent[i] && !gone[i] && !ent[i]->inuse) gone[i] = h_frames - start - 1;
+    }
+    for (int i = 0; i < count; i++) {
+        if (!ent[i]) continue;
+        CHECK(!ent[i]->inuse, "gib/debris %d is collected", i);
+        CHECK(gone[i] == lifetime[i], "seed %u gib/debris %d frees at step %d (expected %d)",
+              seed, i, gone[i], lifetime[i]);
+        h_t23_sample(va("freed_%u_%d", seed, i), gone[i], !ent[i]->inuse);
+    }
+}
+
+static void sc_t23_gib_lifetime(void)
+{
+    static const char *map_gibs[] = { "misc_gib_arm", "misc_gib_leg", "misc_gib_head" };
+    h_scene_base();
+    for (int i = 0; i < 3; i++)
+        h_ent("{\n\"classname\" \"%s\"\n\"origin\" \"%d 1000 40\"\n}\n", map_gibs[i], 100 * i);
+    h_start(h_ents);
+    h_t23_gib_lifetimes(map_gibs, 73);
+    h_t23_gib_lifetimes(NULL, 1234);
+}
+
+static void sc_t23_push_sound(void)
+{
+    h_scene_base();
+    int model = h_add_inline(448, -64, 0, 576, 64, 128);
+    h_ent("{\n\"classname\" \"trigger_push\"\n\"model\" \"*%d\"\n\"angle\" \"-1\"\n\"speed\" \"40\"\n}\n", model);
+    h_start(h_ents);
+    edict_t *p = h_join(0, "p1");
+    h_frames_n(h_rate);
+    int start = h_frames, mark = h_nsounds, wind = imp_soundindex("misc/windfly.wav");
+    h_place(p, 512, 0, 24);
+    h_think(p, 0, 10);
+    CHECK(p->velocity[2] == 400 && h_count_sounds(wind, mark) == 1, "jump pad launches with windfly on the contacting usercmd");
+    h_think(p, 0, 10);
+    h_frames_n(15 * h_rate / 10);
+    h_place(p, 512, 0, 24);
+    h_think(p, 0, 10);
+    CHECK(h_count_sounds(wind, mark) == 1, "same-frame and deadline contacts are silent");
+    h_frame();
+    h_place(p, 512, 0, 24);
+    h_think(p, 0, 10);
+    CHECK(h_count_sounds(wind, mark) == 2, "windfly plays on the first step after 1.5 s");
+    h_t23_sample("windfly", h_frames - start, h_count_sounds(wind, mark));
+}
+
+static void sc_t23_edict_reuse(void)
+{
+    h_scene_base();
+    h_start(h_ents);
+    edict_t *source = G_Spawn(), *victim = G_Spawn();
+    h_frames_n(2 * h_rate - 1);
+    CHECK(G_CrushAllowed(source, victim) && !G_CrushAllowed(source, victim), "fixture has a pending crush cooldown");
+    G_FreeEdict(source);
+    edict_t *early = G_Spawn();
+    CHECK(early == source && G_CrushAllowed(early, victim), "early reuse is immediate and clears the crush pair");
+    h_t23_sample("initial_reuse", 0, early == source);
+    h_frame();
+    int start = h_frames;
+    G_FreeEdict(early);
+    edict_t *before = G_Spawn();
+    CHECK(before != early, "later removal withholds its slot");
+    h_frames_n(h_rate / 2);
+    CHECK(G_Spawn() != early, "slot remains unavailable at exactly 0.5 s");
+    h_frame();
+    edict_t *after = G_Spawn();
+    CHECK(after == early, "slot is available on the first step after 0.5 s");
+    h_t23_sample("later_reuse", h_frames - start, after == early);
+}
+
+static void sc_t23_projectile_lifetime(void)
+{
+    h_scene_base();
+    h_ent("{\n\"classname\" \"info_player_deathmatch\"\n\"origin\" \"300 0 24\"\n}\n");
+    h_ent("{\n\"classname\" \"target_blaster\"\n\"origin\" \"0 1000 100\"\n\"speed\" \"300\"\n}\n");
+    h_start(h_ents);
+    edict_t *a = h_join(0, "p1"), *b = h_join(1, "p2");
+    h_frames_n(3 * h_rate);
+    if (!h_t23_start(a, b)) return;
+    edict_t *shooter = h_by_class("target_blaster", 0);
+    if (!shooter) imp_error("target_blaster missing");
+    vec3_t start = { 0, -1000, 100 }, aim = { 1, 0, 0 };
+    fire_blaster(a, start, aim, 15, 300, EF_BLASTER, false);
+    edict_t *bolt = h_by_class("bolt", 0);
+    shooter->use(shooter, a, a);
+    edict_t *map_bolt = h_by_class("bolt", 1);
+    start[1] = 2000;
+    fire_rocket(a, start, aim, 20, 2000, 20, 30);
+    edict_t *rocket = h_by_class("rocket", 0);
+    if (!bolt || !map_bolt || !rocket) imp_error("projectile did not spawn");
+    int spawned = h_frames;
+    int frozen = 0;
+#ifdef HARNESS_OPENTDM
+    h_frames_n(h_rate);
+    h_client_command(a, "time");
+    int paused = h_frames;
+    h_frames_n(5 * h_rate);
+    CHECK(tdm_match_status == MM_TIMEOUT && bolt->inuse && map_bolt->inuse && rocket->inuse, "all lifetimes freeze in pause");
+    h_client_command(a, "time");
+    h_t23_wait_resume();
+    frozen = h_frames - paused - 1;
+#endif
+    h_frames_n(spawned + frozen + 2 * h_rate - h_frames);
+    CHECK(bolt->inuse && map_bolt->inuse, "both bolts exist one step before two seconds");
+    h_frame();
+    CHECK(!bolt->inuse && !map_bolt->inuse && rocket->inuse, "two bolts expire after two match seconds");
+    h_t23_sample("bolts", h_frames - spawned - frozen - 1, !bolt->inuse + !map_bolt->inuse);
+    h_frames_n(2 * h_rate - 1);
+    CHECK(rocket->inuse, "rocket exists one step before four seconds");
+    h_frame();
+    CHECK(!rocket->inuse, "rocket expires after 8000 units/speed in match time");
+    h_t23_sample("rocket", h_frames - spawned - frozen - 1, !rocket->inuse);
+}
+
+static void sc_t23_bfg_effects(void)
+{
+    h_scene_base();
+    h_ent("{\n\"classname\" \"info_player_deathmatch\"\n\"origin\" \"-300 0 24\"\n}\n");
+    h_add_world(90, -512, 0, 128, 512, 512);
+    h_start(h_ents);
+    edict_t *owner = h_join(0, "p1"), *target = h_join(1, "p2");
+    VectorSet(owner->s.origin, -300, 0, 24);
+    imp_linkentity(owner);
+    VectorSet(target->s.origin, -20, 150, 24);
+    imp_linkentity(target);
+    int mark = h_nmsgs;
+    hbfg_t shot = h_bfg_shot(owner, target);
+    edict_t *orb = h_by_class("bfg blast", 0);
+    CHECK(orb && orb->s.frame == 1 && shot.lasers == 2 && shot.boom == 118, "wall impact: two lasers and one 118-point secondary hit");
+    if (!orb || shot.explode < 0) return;
+    h_t23_sample("lasers", shot.touch, shot.lasers);
+    h_t23_sample("explosion", shot.explode - shot.touch, shot.boom);
+    int first = h_frames - 1;
+    for (int phase = 2; phase <= 5; phase++) {
+        h_frames_n(h_div - 1);
+        CHECK(orb->inuse && orb->s.frame == phase - 1, "BFG holds sprite frame %d until next window", phase - 1);
+        h_frame();
+        CHECK(orb->inuse && orb->s.frame == phase, "BFG sprite advances to %d", phase);
+        h_t23_sample(va("sprite_%d", phase), (phase - 1) * h_div, orb->s.frame);
+    }
+    h_frames_n(h_div - 1);
+    CHECK(orb->inuse && orb->s.frame == 5, "BFG holds its final sprite until the removal step");
+    int removed = h_frames;
+    h_frame();
+    int hits = h_count_msgs(H_SVC_TEMP_ENTITY, TE_BFG_EXPLOSION, mark);
+    CHECK(!orb->inuse && hits == 1, "BFG sprite is removed and no secondary hit repeats");
+    h_t23_sample("removed", removed - first, hits);
+}
+
+static struct {
+    int count, frames[16], values[16];
+} h_t23_events[8];
+
+static void h_t23_target_use(edict_t *self, edict_t *other, edict_t *activator)
+{
+    (void)other;
+    (void)activator;
+    int i = self->count;
+    int n = h_t23_events[i].count++;
+    if (n >= 16) imp_error("too many target activations");
+    h_t23_events[i].frames[n] = h_frames;
+    h_t23_events[i].values[n] = self->message ? atoi(self->message) : 0;
+    if (i == 7) {
+        int hours, minutes, seconds;
+        if (!self->message || sscanf(self->message, "%d:%d:%d", &hours, &minutes, &seconds) != 3)
+            imp_error("missing formatted count-up clock");
+        h_t23_events[i].values[n] = (hours * 60 + minutes) * 60 + seconds;
+    }
+}
+
+static void h_t23_target_event(int slot, int event, const char *name, int start, int delay, int value)
+{
+    int at = h_t23_events[slot].frames[event];
+    CHECK(h_t23_events[slot].count > event && at - start == delay &&
+          h_t23_events[slot].values[event] == value, "%s at %d ticks, value %d", name, at - start,
+          h_t23_events[slot].values[event]);
+    h_t23_sample(name, at - start, h_t23_events[slot].values[event]);
+}
+
+static void h_t23_map_timing_targets(edict_t *p)
+{
+    edict_t *clock = h_by_class("func_clock", 0);
+    edict_t *timer = h_by_class("func_timer", 0), *jitter = h_by_class("func_timer", 1);
+    edict_t *multiple = h_by_class("trigger_multiple", 0), *explosion = h_by_class("target_explosion", 0);
+    if (!clock || !timer || !jitter || !multiple || !explosion) imp_error("map timing fixture did not spawn");
+    int start = h_frames;
+    timer->use(timer, p, p);
+    clock->use(clock, p, p);
+    multiple->use(multiple, p, p);
+    multiple->use(multiple, p, p);
+    int mark = h_nmsgs;
+    explosion->use(explosion, p, p);
+    h_frames_n(h_rate / 2);
+    CHECK(h_t23_events[4].count == 1 && !h_count_msgs(H_SVC_TEMP_ENTITY, TE_EXPLOSION1, mark),
+          "multiple and explosion wait through their deadline");
+    h_frame();
+    multiple->use(multiple, p, p);
+    int explosions = h_count_msgs(H_SVC_TEMP_ENTITY, TE_EXPLOSION1, mark);
+    CHECK(explosions == 1 && h_t23_events[4].count == 2, "one explosion and one repeat activation after wait");
+    h_t23_sample("explosion", h_frames - start - 1, explosions);
+    h_t23_target_event(4, 1, "multiple", start, h_rate / 2 + 1, 0);
+    h_frames_n(start + 16 * h_rate / 10 + 1 - h_frames);
+    h_t23_target_event(5, 0, "timer_first", start, 6 * h_rate / 10, 0);
+    h_t23_target_event(5, 1, "timer_repeat", start, 16 * h_rate / 10, 0);
+    timer->use(timer, p, p);
+    h_frames_n(start + 2 * h_rate + 1 - h_frames);
+    h_t23_target_event(2, 0, "clock_2", start, 0, 2);
+    h_t23_target_event(2, 1, "clock_1", start, h_rate, 1);
+    h_t23_target_event(2, 2, "clock_0", start, 2 * h_rate, 0);
+    h_t23_target_event(3, 0, "clock_done", start, 2 * h_rate, 0);
+    start = h_frames;
+    clock->use(clock, p, p);
+    h_t23_target_event(2, 3, "clock_restart", start, 0, 2);
+
+    CHECK(fabsf(jitter->random - (0.2f - 1.0f / h_rate)) < H_EPS, "random equal to wait is clamped one tick below wait");
+    h_t23_seed(0);
+    jitter->use(jitter, p, p);
+    int n = h_t23_events[5].count;
+    for (int i = 0; h_t23_events[5].count == n && i < h_rate; i++) h_frame();
+    CHECK(h_t23_events[5].count == n + 1, "seeded timer repeats exactly once before switch-off");
+    h_t23_sample("random_repeat", h_frames - start - 1, h_t23_events[5].count - n);
+    jitter->use(jitter, p, p);
+    h_frames_n(2 * h_rate);
+    CHECK(h_t23_events[5].count == n + 1, "switched-off timers stop activating targets");
+}
+
+static void sc_t23_map_timers(void)
+{
+    h_scene_base();
+    int model = h_add_inline(1500, -48, 0, 1600, 48, 64);
+    h_ent("{\n\"classname\" \"trigger_multiple\"\n\"model\" \"*%d\"\n\"wait\" \"0.5\"\n\"target\" \"multiple\"\n}\n", model);
+    h_ent("{\n\"classname\" \"trigger_always\"\n\"target\" \"always\"\n}\n");
+    h_ent("{\n\"classname\" \"target_crosslevel_trigger\"\n\"spawnflags\" \"1\"\n}\n");
+    h_ent("{\n\"classname\" \"target_crosslevel_target\"\n\"spawnflags\" \"1\"\n\"target\" \"crosslevel\"\n}\n");
+    h_ent("{\n\"classname\" \"func_clock\"\n\"target\" \"display\"\n\"pathtarget\" \"done\"\n\"spawnflags\" \"14\"\n\"count\" \"2\"\n}\n");
+    h_ent("{\n\"classname\" \"func_timer\"\n\"target\" \"timer\"\n\"delay\" \"0.3\"\n\"wait\" \"1\"\n}\n");
+    h_ent("{\n\"classname\" \"func_timer\"\n\"target\" \"timer\"\n\"wait\" \"0.2\"\n\"random\" \"0.2\"\n}\n");
+    h_ent("{\n\"classname\" \"func_timer\"\n\"target\" \"auto\"\n\"spawnflags\" \"1\"\n\"pausetime\" \"0.4\"\n\"wait\" \"0.6\"\n}\n");
+    h_ent("{\n\"classname\" \"func_clock\"\n\"target\" \"countup\"\n\"spawnflags\" \"1\"\n\"style\" \"2\"\n\"count\" \"61\"\n}\n");
+    h_ent("{\n\"classname\" \"target_explosion\"\n\"origin\" \"1500 1000 24\"\n\"delay\" \"0.5\"\n}\n");
+    h_ent("{\n\"classname\" \"target_laser\"\n\"origin\" \"200 0 24\"\n\"angle\" \"180\"\n\"spawnflags\" \"1\"\n}\n");
+    h_ent("{\n\"classname\" \"target_earthquake\"\n\"targetname\" \"quake\"\n\"count\" \"1\"\n}\n");
+    h_start(h_ents);
+    static char *names[] = { "always", "crosslevel", "display", "done", "multiple", "timer", "auto", "countup" };
+    for (unsigned i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+        edict_t *sink = G_Spawn();
+        sink->targetname = names[i];
+        sink->count = i;
+        sink->use = h_t23_target_use;
+    }
+    edict_t *cross = h_by_class("target_crosslevel_trigger", 0);
+    edict_t *laser = h_by_class("target_laser", 0), *quake = h_by_class("target_earthquake", 0);
+    edict_t *countup = h_by_class("func_clock", 1), *autotimer = h_by_class("func_timer", 2);
+    if (!cross || !laser || !quake || !countup || !autotimer) imp_error("map timer fixture missing");
+    countup->health = 59;
+    cross->use(cross, world, world);
+    edict_t *p = h_join(0, "p1");
+    h_frames_n(h_rate - h_frames);
+    CHECK(laser->use == NULL, "laser still uninitialized before one second");
+    int hp = h_hp_now(p);
+    for (int i = 0; i < h_rate; i++) {
+        int before = h_hp_now(p);
+        h_frame();
+        CHECK(before - h_hp_now(p) == (i % h_div == 0), "laser damage at step %d", i);
+    }
+    CHECK(laser->use != NULL && h_hp_now(p) == hp - 10, "laser starts at one second and hits ten times a second");
+    h_t23_sample("laser_damage", h_rate, hp - h_hp_now(p));
+    laser->use(laser, p, p);
+    h_frame();
+    h_t23_target_event(0, 0, "always", 0, 2 * h_div, 0);
+    h_t23_target_event(1, 0, "crosslevel", 0, 2 * h_rate, 0);
+    h_t23_map_timing_targets(p);
+    h_t23_target_event(6, 0, "timer_auto", 0, 2 * h_rate, 0);
+    h_t23_target_event(6, 1, "timer_auto_repeat", 0, 26 * h_rate / 10, 0);
+    autotimer->use(autotimer, p, p);
+    for (int i = 0; i < 3; i++)
+        h_t23_target_event(7, i, va("count_up_%d", i), 0, (i + 1) * h_rate, 59 + i);
+
+    int start = h_frames, mark = h_nsounds, quake_sounds = imp_soundindex("world/quake.wav"), moves = 0;
+    quake->use(quake, p, p);
+    h_t23_seed(23);
+    for (int i = 0; i <= h_rate; i++) {
+        p->groundentity = world;
+        p->groundentity_linkcount = world->linkcount;
+        VectorClear(p->velocity);
+        h_frame();
+        CHECK((p->velocity[2] > 0) == (i > 0 && i % h_div == 0), "quake impulse at step %d", i);
+        if (p->velocity[2] > 0) moves++;
+    }
+    int sounds = h_sounds_in(quake, quake_sounds, start, h_frames);
+    CHECK(moves == 10 && sounds == 2, "one-second quake has ten impulses and two sounds");
+    h_t23_sample("quake", h_rate, moves);
+    int n = 0;
+    for (int i = mark; i < h_nsounds; i++) {
+        if (h_sounds_log[i].soundindex != quake_sounds) continue;
+        int tick = h_sounds_log[i].frame - start;
+        CHECK(tick == (1 + 6 * n) * h_div, "quake sound %d at step %d", n, tick);
+        h_t23_sample(va("quake_sound_%d", n++), tick, 1);
+    }
+    p->groundentity = world;
+    VectorClear(p->velocity);
+    h_frames_n(h_div);
+    CHECK(!p->velocity[2], "quake stops after one second");
+}
+
+static void sc_t23_viper_pitch(void)
+{
+    h_scene_base();
+    h_ent("{\n\"classname\" \"misc_viper_bomb\"\n\"origin\" \"0 0 3000\"\n}\n");
+    h_start(h_ents);
+    edict_t *bomb = h_by_class("misc_viper_bomb", 0), *viper = G_Spawn();
+    if (!bomb || !bomb->use) imp_error("viper bomb missing");
+    viper->classname = "misc_viper";
+    VectorSet(viper->moveinfo.dir, 1, 0, 0);
+    viper->moveinfo.speed = 100;
+    h_frames_n(2 * h_rate);
+    bomb->use(bomb, world, world);
+    static const int phases[] = { 0, 2, 5, 8, 10, 12 };
+    int start = h_frames;
+    for (unsigned i = 0; i < sizeof(phases) / sizeof(phases[0]); i++) {
+        int at = phases[i] * h_div;
+        h_frames_n(start + at - h_frames);
+        h_frame();
+        double drop = phases[i] * 0.1;
+        int want = drop >= 1 ? -270 : -(int)(atan2(-drop, 1 - drop) * 180 / M_PI);
+        if (want > 0) want -= 360;
+        CHECK(bomb->inuse && fabsf(bomb->s.angles[PITCH] - want) <= 0.01f,
+              "viper pitch at %d tenths is %.2f (expected %d)", phases[i], bomb->s.angles[PITCH], want);
+        h_t23_sample(va("pitch_%d", phases[i]), at, lroundf(bomb->s.angles[PITCH] * 100));
+    }
+}
+
+static void h_t23_centerprint(edict_t *p, const char *fmt, ...)
+{
+    char text[256];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(text, sizeof(text), fmt, ap);
+    va_end(ap);
+    h_log_long(NUM(p), -1, text);
+}
+
+static int h_t23_mover_segment(edict_t *e, const char *tag, const vec3_t end, int angular)
+{
+    float *v = angular ? e->avelocity : e->velocity;
+    for (int i = 0; H_VZERO(v) && i < 6 * h_rate; i++) h_frame();
+    int start = h_frames;
+    CHECK(!H_VZERO(v), "%s starts moving", tag);
+    for (int i = 0; !H_VZERO(v) && i < 4 * h_rate; i++) h_frame();
+    float *pos = angular ? e->s.angles : e->s.origin;
+    vec3_t error;
+    VectorSubtract(pos, end, error);
+    CHECK(H_VZERO(v) && VectorLength(error) <= (angular ? H_EPS : 0.125f),
+          "%s stops at endpoint (error %.4f)", tag, VectorLength(error));
+    h_t23_sample(tag, h_frames - start, lroundf(VectorLength(pos)));
+    return start;
+}
+
+static void h_t23_mover_wait(const char *event, int arrived, int departed, int delay)
+{
+    int elapsed = departed - arrived;
+    CHECK(abs(elapsed - delay) <= h_div, "%s waits %.3f s (expected %.3f)", event,
+          (double)elapsed / h_rate, (double)delay / h_rate);
+    h_t23_sample(event, elapsed, 1);
+}
+
+static void h_t23_locked_door(edict_t *door, edict_t *p)
+{
+    CHECK(door->touch != NULL, "targeted door has a locked message");
+    if (!door->touch) return;
+    int start = h_frames, text = h_ntexts, events = h_nsounds;
+    door->touch(door, p, NULL, NULL);
+    door->touch(door, p, NULL, NULL);
+    h_frames_n(5 * h_rate - 1);
+    door->touch(door, p, NULL, NULL);
+    h_frame();
+    door->touch(door, p, NULL, NULL);
+    int sounds = h_count_sounds(imp_soundindex("misc/talk1.wav"), events);
+    const htext_t *first = h_text_to(p, -1, "locked fixture", text);
+    const htext_t *second = first ? h_text_to(p, -1, "locked fixture", (int)(first - h_texts) + 1) : NULL;
+    CHECK(first && second && first->frame == start && second->frame == h_frames && sounds == 2,
+          "locked door prints and beeps only once per five seconds");
+    h_t23_sample("locked_door", second ? second->frame - start : -1, sounds);
+}
+
+/* Use the RunFrame index of both sound and coordinate observations. */
+static void h_t23_plat_cycle(edict_t *plat, edict_t *trigger, edict_t *p, int extend)
+{
+    int start = h_frames, mark = h_nsounds;
+    trigger->touch(trigger, p, NULL, NULL);
+    int top = -1, down = -1, bottom = -1, sound = -1;
+    int top_touch = 25 * h_rate / 10;
+    float upper = plat->pos1[2], lower = plat->pos2[2];
+    for (int i = 0; i < 7 * h_rate && bottom < 0; i++) {
+        float before = plat->s.origin[2];
+        int tick = h_frames;
+        if (extend && top >= 0 && tick - top - 1 == top_touch)
+            trigger->touch(trigger, p, NULL, NULL);
+        h_frame();
+        float after = plat->s.origin[2];
+        if (top < 0 && fabsf(after - upper) < H_EPS) top = tick;
+        if (top < 0) continue;
+        if (down < 0 && before - after >= 0.125f) down = tick;
+        if (down >= 0 && fabsf(after - lower) < H_EPS) bottom = tick;
+    }
+    for (int i = mark; i < h_nsounds; i++)
+        if (h_sounds_log[i].entnum == NUM(plat) && h_sounds_log[i].soundindex == plat->moveinfo.sound_start &&
+            h_sounds_log[i].frame >= top) sound = h_sounds_log[i].frame;
+    CHECK(top >= 0 && sound > top && down > sound && bottom > down,
+          "plat cycle %d: from %d to top %d, sound %d, first down %d, bottom %d",
+          extend, start, top, sound, down, bottom);
+    int scheduled_wait = extend ? top_touch + h_rate : 3 * h_rate;
+    CHECK(sound - top == scheduled_wait + extend,
+          "platform sound follows the scheduled top wait (cycle %d)", extend);
+    // Two steps from Move_Calc through Think_AccelMove to the next push, plus one from arrival to the touch clock.
+    int dispatch_steps = 2 + extend;
+    int wait_at_10hz = scheduled_wait / h_div + dispatch_steps;
+    int expected_wait = wait_at_10hz * h_div - dispatch_steps * (h_div - 1);
+    CHECK(down - top == expected_wait, "platform top wait (cycle %d): %d steps, expected %d",
+          extend, down - top, expected_wait);
+    int final_push = 0;
+#ifndef HARNESS_OPENTDM
+    /* OpenFFA's accelerated descent in this fixture reaches the endpoint a tick later at 40–60 Hz. */
+    final_push = h_div >= 4;
+#endif
+    int travel = bottom - down + 1;
+    CHECK(travel == 7 * h_div + final_push, "platform descent lasts %d steps (expected %d)",
+          travel, 7 * h_div + final_push);
+    CHECK(h_sounds_in(plat, plat->moveinfo.sound_end, start, h_frames) == 2,
+          "platform reaches both endpoints once");
+    h_t23_sample(va("plat_%d_top", extend), top - start, 1);
+    h_t23_sample(va("plat_%d_sound", extend), sound - top, 1);
+    h_t23_sample(va("plat_%d_wait", extend), down - top, 1);
+    h_t23_sample(va("plat_%d_travel", extend), travel - final_push, 1);
+}
+
+static void sc_t23_movers_wait(void)
+{
+    h_scene_base();
+    int plat_model = h_add_inline(-64, 936, 64, 64, 1064, 128);
+    int button_model = h_add_inline(0, 1350, 0, 44, 1382, 64);
+    int door_model = h_add_inline(0, 1650, 0, 108, 1714, 128);
+    int rotating_model = h_add_inline(0, -16, -24, 80, 16, 40);
+    int train_model = h_add_inline(128, 2000, 32, 176, 2048, 64);
+    int secret_model = h_add_inline(0, 2500, 0, 50, 2550, 64);
+    h_ent("{\n\"classname\" \"func_plat\"\n\"model\" \"*%d\"\n\"height\" \"64\"\n\"speed\" \"180\"\n\"accel\" \"40\"\n\"decel\" \"60\"\n}\n", plat_model);
+    h_ent("{\n\"classname\" \"func_button\"\n\"model\" \"*%d\"\n\"wait\" \"0.7\"\n}\n", button_model);
+    h_ent("{\n\"classname\" \"func_door\"\n\"model\" \"*%d\"\n\"speed\" \"50\"\n\"wait\" \"1.5\"\n\"targetname\" \"testdoor\"\n\"message\" \"locked fixture\"\n}\n", door_model);
+    h_ent("{\n\"classname\" \"func_door_rotating\"\n\"model\" \"*%d\"\n\"origin\" \"0 3000 48\"\n\"targetname\" \"testrotating\"\n\"speed\" \"90\"\n\"wait\" \"1.5\"\n\"distance\" \"90\"\n}\n", rotating_model);
+    h_ent("{\n\"classname\" \"func_train\"\n\"model\" \"*%d\"\n\"targetname\" \"testtrain\"\n\"target\" \"a\"\n}\n", train_model);
+    h_ent("{\n\"classname\" \"path_corner\"\n\"targetname\" \"a\"\n\"target\" \"b\"\n\"origin\" \"128 2000 32\"\n}\n");
+    h_ent("{\n\"classname\" \"path_corner\"\n\"targetname\" \"b\"\n\"target\" \"c\"\n\"origin\" \"228 2000 32\"\n\"wait\" \"1.5\"\n}\n");
+    h_ent("{\n\"classname\" \"path_corner\"\n\"targetname\" \"c\"\n\"origin\" \"128 2000 32\"\n\"wait\" \"1.5\"\n}\n");
+    h_ent("{\n\"classname\" \"func_door_secret\"\n\"model\" \"*%d\"\n\"wait\" \"1.5\"\n\"targetname\" \"testsecret\"\n}\n", secret_model);
+    h_imports.centerprintf = h_t23_centerprint;
+    h_start(h_ents);
+    edict_t *p = h_join(0, "p1");
+    h_frames_n(h_rate);
+    edict_t *plat = h_by_class("func_plat", 0), *button = h_by_class("func_button", 0);
+    edict_t *door = h_by_class("func_door", 0), *rotate = h_by_class("func_door_rotating", 0);
+    edict_t *train = h_by_class("func_train", 0), *secret = h_by_model(va("*%d", secret_model));
+    if (!plat || !button || !door || !rotate || !train || !secret) imp_error("mover fixture did not spawn");
+    edict_t *trigger = NULL;
+    for (int i = 1; i < ge->num_edicts; i++) {
+        edict_t *e = EDICT(i);
+        if (e->inuse && e->enemy == plat && e->solid == SOLID_TRIGGER) trigger = e;
+    }
+    if (!trigger) imp_error("plat trigger missing");
+
+    h_t23_locked_door(door, p);
+    h_t23_plat_cycle(plat, trigger, p, 0);
+    h_t23_plat_cycle(plat, trigger, p, 1);
+
+    button->use(button, p, p);
+    h_t23_mover_segment(button, "button_down", button->pos2, 0);
+    int arrived = h_frames;
+    int depart = h_t23_mover_segment(button, "button_up", button->pos1, 0);
+    h_t23_mover_wait("button_wait", arrived, depart, 7 * h_div);
+
+    door->use(door, p, p);
+    h_t23_mover_segment(door, "door_open", door->pos2, 0);
+    arrived = h_frames;
+    h_frames_n(h_rate / 2);
+    door->use(door, p, p);
+    depart = h_t23_mover_segment(door, "door_close", door->pos1, 0);
+    h_t23_mover_wait("door_wait", arrived, depart, 2 * h_rate);
+
+    rotate->use(rotate, p, p);
+    h_t23_mover_segment(rotate, "rotating_open", rotate->pos2, 1);
+    arrived = h_frames;
+    depart = h_t23_mover_segment(rotate, "rotating_close", rotate->pos1, 1);
+    h_t23_mover_wait("rotating_wait", arrived, depart, 15 * h_rate / 10);
+
+    vec3_t home, away;
+    VectorCopy(train->s.origin, home);
+    VectorCopy(home, away);
+    away[0] += 100;
+    train->use(train, p, p);
+    h_t23_mover_segment(train, "train_out", away, 0);
+    arrived = h_frames;
+    depart = h_t23_mover_segment(train, "train_back", home, 0);
+    h_t23_mover_wait("train_wait", arrived, depart, 15 * h_rate / 10);
+
+    level.current_entity = p; /* ClientThink dispatches use outside the mover's own step. */
+    secret->use(secret, p, p);
+    h_t23_mover_segment(secret, "secret_recess", secret->pos1, 0);
+    arrived = h_frames;
+    depart = h_t23_mover_segment(secret, "secret_open", secret->pos2, 0);
+    h_t23_mover_wait("secret_recess_wait", arrived, depart, h_rate);
+    arrived = h_frames;
+    depart = h_t23_mover_segment(secret, "secret_close", secret->pos1, 0);
+    h_t23_mover_wait("secret_open_wait", arrived, depart, 15 * h_rate / 10);
+    arrived = h_frames;
+    depart = h_t23_mover_segment(secret, "secret_flush", vec3_origin, 0);
+    h_t23_mover_wait("secret_close_wait", arrived, depart, h_rate);
+}
+
+static void sc_unlag_default(void)
+{
+    h_scene_base();
+    h_start(h_ents);
+    cvar_t *mode = h_cvar_find("g_unlag");
+    CHECK(mode && mode->value == 0, "g_unlag is registered and off by default");
+}
+
 static const struct { const char *name; void (*run)(void); } h_scenarios[] = {
     { "smoke", sc_smoke },
     { "t01_rate_refuse", sc_t01_rate_refuse },
@@ -3912,5 +6273,66 @@ static const struct { const char *name; void (*run)(void); } h_scenarios[] = {
     { "t24_toss_timeout", sc_t24_toss_timeout },
 #endif
 #endif
+#ifdef HARNESS_OPENTDM
+    { "t23_match_phases", sc_t23_match_phases },
+    { "t23_timeout_clocks", sc_t23_timeout_clocks }, /* Match clocks and duel reconnect during timeout. */
+    { "t23_scoreboard_handicap", sc_t23_scoreboard_handicap }, /* Match scoreboard and ping handicap. */
+    { "t23_cmd_penalties", sc_t23_cmd_penalties }, /* Team, match and vote commands. */
+    { "t23_vote_window", sc_t23_vote_window }, /* OpenTDM ballots and match deadlines. */
+#endif
+    { "t23_flood", sc_t23_flood }, /* Box: Shared chat and gesture cooldowns. */
+#ifdef HARNESS_OPENTDM
+    { "t23_mute", sc_t23_mute }, /* OpenTDM per-player mute through timeout. */
+#endif
+    { "t23_inactivity", sc_t23_inactivity }, /* Box: Pregame MOTD and idle removal. */
+    { "t23_item_respawn", sc_t23_item_respawn }, /* Box: Pickup, mega decay and item return. */
+    { "t23_dropped_items", sc_t23_dropped_items }, /* Box: Owner lock, expiry and inherited quad. */
+    { "t23_powerup_lifetime", sc_t23_powerup_lifetime }, /* Box: Powerup duration, HUD and damage. */
+    { "t23_powerup_warning", sc_t23_powerup_warning }, /* Box: Warning and blink during active play. */
+    { "t23_item_hud", sc_t23_item_hud }, /* Box: Pickup display, expiry and weapon drop. */
+    { "t23_power_armor", sc_t23_power_armor }, /* Box: Cell consumption, effect and HUD. */
+    { "t23_view_batches", sc_t23_view_batches }, /* Box: Damage, bob and kick during active play. */
+    { "t23_lava_slime", sc_t23_lava_slime }, /* Box: Damage and sounds during active play. */
+    { "t23_drowning", sc_t23_drowning }, /* Box: Air, drowning and rebreather. */
+    { "t23_player_animation", sc_t23_player_animation }, /* Box: Running and gestures. */
+    { "t23_respawn", sc_t23_respawn }, /* Box: Spawn selection, respawn and kill. */
+    { "t23_weapon_pain", sc_t23_weapon_pain }, /* Box: Empty weapon debounce. */
+    { "t23_map_animations", sc_t23_map_animations }, /* Box: Map model animation timing. */
+    { "t23_gib_lifetime", sc_t23_gib_lifetime }, /* Box: Gib and head expiry. */
+    { "t23_push_sound", sc_t23_push_sound }, /* Box: Jump pad sound debounce. */
+    { "t23_edict_reuse", sc_t23_edict_reuse }, /* Box: Reuse delay and crush cleanup. */
+    { "t23_projectile_lifetime", sc_t23_projectile_lifetime }, /* Box: Projectile expiry during active play. */
+    { "t23_bfg_effects", sc_t23_bfg_effects }, /* Box: BFG hits, sprite and removal. */
+    { "t23_map_timers", sc_t23_map_timers }, /* Box: Map timer and hazard timing. */
+    { "t23_viper_pitch", sc_t23_viper_pitch }, /* Engine: Viper bomb pitch over time. */
+    { "t23_movers_wait", sc_t23_movers_wait }, /* Engine: Mover waits and endpoints. */
+#ifdef HARNESS_ENGINE
+    { "unlag_fixture", sc_unlag_fixture },
+    { "unlag_rail", sc_unlag_rail },
+    { "unlag_no_extension", sc_unlag_no_extension },
+    { "unlag_limits", sc_unlag_limits },
+    { "unlag_delayed", sc_unlag_delayed },
+    { "unlag_rail_row", sc_unlag_rail_row },
+    { "unlag_rail_mixed_overlap", sc_unlag_rail_mixed_overlap },
+    { "unlag_rail_history_overlap", sc_unlag_rail_history_overlap },
+    { "unlag_water", sc_unlag_water },
+    { "unlag_shotgun_kill", sc_unlag_shotgun_kill },
+    { "unlag_stationary_kill", sc_unlag_stationary_kill },
+    { "unlag_history", sc_unlag_history },
+    { "unlag_trace", sc_unlag_trace },
+    { "unlag_lifetimes", sc_unlag_lifetimes },
+    { "unlag_stance", sc_unlag_stance },
+    { "unlag_held", sc_unlag_held },
+    { "unlag_blockers", sc_unlag_blockers },
+    { "unlag_bench", sc_unlag_bench },
+    { "unlag_bench_dense", sc_unlag_bench_dense },
+#ifdef HARNESS_OPENTDM
+    { "unlag_timeout", sc_unlag_timeout },
+    { "unlag_match_start", sc_unlag_match_start },
+    { "unlag_teammate", sc_unlag_teammate },
+    { "unlag_match_stats", sc_unlag_match_stats },
+#endif
+#endif
+    { "unlag_default", sc_unlag_default },
     { NULL, NULL }
 };

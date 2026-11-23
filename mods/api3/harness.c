@@ -20,6 +20,8 @@
 #include "g_tdm.h"
 #endif
 #include <setjmp.h>
+#include <inttypes.h>
+#include <stdbool.h>
 #include <signal.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -40,6 +42,7 @@
 #define H_SVC_TEMP_ENTITY 3
 #define H_SVC_LAYOUT 4
 #define H_SVC_STUFFTEXT 11
+#define H_SVC_CONFIGSTRING 13
 #ifdef HARNESS_OPENTDM
 _Static_assert(H_SVC_LAYOUT == SVC_LAYOUT && H_SVC_STUFFTEXT == SVC_STUFFTEXT, "svc numbers");
 #else
@@ -64,8 +67,27 @@ static char h_errmsg[1024];
 static int h_rate = 10;
 static int h_div = 1;           /* world ticks per 100 ms weapon/keyframe step */
 static int h_frames;            /* RunFrame calls so far */
+#ifdef HARNESS_ENGINE
+static int h_unlag_fixture;
+static int h_maxclients = 4;
+static bool h_unlag_initialized;
+static edict_t *h_unlag_command_ent;
+static unlag_command_t h_unlag_command;
+static int h_unlag_clips;
+static int h_unlag_trace_budget;
+static short h_unlag_yaw;
+static char h_unlag_log[256];
+static int h_unlag_lines;
+#endif
 
 static double h_time(void) { return (double)h_frames / h_rate; }
+
+static const char *h_scenario;
+
+static void h_t23_sample(const char *event, int elapsed_frames, int count)
+{
+    printf("T23 %s %s %.9f %d\n", h_scenario, event, (double)elapsed_frames / h_rate, count);
+}
 
 /* client time in ms at the start of world tick k (floor): a usercmd before
  * tick k lasts h_tick_ms(k + 1) - h_tick_ms(k), 16/17 ms at 60 Hz, 1000 ms a second */
@@ -191,6 +213,12 @@ static void imp_dprintf(const char *fmt, ...)
     char text[1024];
     va_list ap; va_start(ap, fmt); vsnprintf(text, sizeof(text), fmt, ap); va_end(ap);
     h_log_text(h_dprints, &h_ndprints, sizeof(h_dprints) / sizeof(h_dprints[0]), 0, text);
+#ifdef HARNESS_ENGINE
+    if (h_unlag_fixture && !strncmp(text, "unlag slot=", 11)) {
+        snprintf(h_unlag_log, sizeof(h_unlag_log), "%s", text);
+        h_unlag_lines++;
+    }
+#endif
     if (h_verbose) printf("    [dprint] %s", text);
 }
 /* client prints and stufftext/layout unicasts (the text a client gets),
@@ -278,6 +306,9 @@ static int h_ninline;
 /* world solid boxes; entity 0 is the world */
 static hbox_t h_world[32];
 static int h_nworld;
+#ifdef HARNESS_ENGINE
+static int h_world_contents[32];
+#endif
 
 static void h_add_world(float x0, float y0, float z0, float x1, float y1, float z1)
 {
@@ -296,7 +327,7 @@ static int h_add_inline(float x0, float y0, float z0, float x1, float y1, float 
 
 #ifdef HARNESS_ENGINE
 void he_init(void);
-void he_load_map(const float *boxes, int nboxes, const float *inl, int ninline);
+void he_load_map(const float *boxes, int nboxes, const float *inl, int ninline, const int *contents, int split_vis);
 void he_set_game(void *exports);
 void he_inline_bounds(const char *name, float *mins, float *maxs);
 trace_t he_trace(const vec3_t start, const vec3_t mins, const vec3_t maxs, const vec3_t end, edict_t *pass, int mask);
@@ -305,6 +336,9 @@ int he_boxedicts(const vec3_t mins, const vec3_t maxs, edict_t **list, int maxco
 void he_link(edict_t *ent);
 void he_unlink(edict_t *ent);
 void he_pmove(void *pm);
+uint32_t he_multicast(const vec3_t origin, multicast_t mode, const byte *data, size_t len, int maxclients);
+trace_t q_gameabi he_clip(const vec3_t start, const vec3_t mins, const vec3_t maxs,
+                        const vec3_t end, edict_t *ent, int mask);
 #endif
 
 static void imp_linkentity(edict_t *ent)
@@ -432,6 +466,13 @@ static trace_t imp_trace(const vec3_t start, const vec3_t mins_in, const vec3_t 
                          const vec3_t end, edict_t *passent, int mask)
 {
 #ifdef HARNESS_ENGINE
+    if (h_unlag_trace_budget && !mins_in && !maxs_in && end[0] - start[0] > 7000
+        && --h_unlag_trace_budget == 0) {
+        CHECK(0, "rail did not finish within its trace budget");
+        trace_t miss = { .fraction = 1 };
+        VectorCopy(end, miss.endpos);
+        return miss;
+    }
     return he_trace(start, mins_in, maxs_in, end, passent, mask);
 #endif
     static const vec3_t zero = {0, 0, 0};
@@ -569,6 +610,17 @@ static int h_nmsgs;
 static hsound_t h_sounds_log[8192];
 static int h_nsounds;
 
+#ifdef HARNESS_ENGINE
+typedef struct {
+    vec3_t origin;
+    multicast_t mode;
+    uint32_t recipients;
+    int svc, sub;
+} h_multicast_t;
+static h_multicast_t h_multicasts[8192];
+static int h_nmulticasts;
+#endif
+
 static void h_w(int c) { if (h_wlen < (int)sizeof(h_wbuf)) h_wbuf[h_wlen++] = (byte)c; }
 static void imp_WriteChar(int c) { h_w(c); }
 static void imp_WriteByte(int c) { h_w(c); }
@@ -597,12 +649,31 @@ static void h_flush_to(int to)
             m->sub = h_wbuf[3];
         } else if (m->svc == H_SVC_TEMP_ENTITY && h_wlen >= 2) {
             m->sub = h_wbuf[1];
+        } else if (m->svc == H_SVC_CONFIGSTRING && h_wlen >= 3) {
+            m->entnum = to;
+            m->sub = h_wbuf[1] | (h_wbuf[2] << 8);
         }
     }
     h_wlen = 0;
 }
 static void h_flush(void) { h_flush_to(-1); }
-static void imp_multicast(const vec3_t o, multicast_t to) { (void)o; (void)to; h_flush(); }
+static void imp_multicast(const vec3_t o, multicast_t to)
+{
+#ifdef HARNESS_ENGINE
+    if (h_unlag_fixture && h_wlen && h_nmulticasts < sizeof(h_multicasts) / sizeof(h_multicasts[0])) {
+        h_multicast_t *m = &h_multicasts[h_nmulticasts++];
+        if (o)
+            VectorCopy(o, m->origin);
+        else
+            VectorClear(m->origin);
+        m->mode = to;
+        m->svc = h_wbuf[0];
+        m->sub = h_wlen > 1 ? h_wbuf[1] : -1;
+        m->recipients = he_multicast(o, to, h_wbuf, h_wlen, h_maxclients);
+    }
+#endif
+    h_flush();
+}
 static void imp_unicast(edict_t *ent, qboolean reliable) { (void)reliable; h_flush_to(NUM(ent)); }
 
 static void imp_sound(edict_t *ent, int channel, int idx, float vol, float att, float ofs)
@@ -698,6 +769,38 @@ static game_import_t h_imports = {
 
 game_export_t *GetGameAPI(game_import_t *import);
 
+#ifdef HARNESS_ENGINE
+const game_export_ex_t *GetGameAPIEx(const game_import_ex_t *import);
+
+static int h_unlag_world(void) { return h_frames; }
+static int h_unlag_rate(void) { return h_unlag_initialized ? h_rate : 10; }
+
+static unlag_command_t h_unlag_context(const edict_t *ent)
+{
+    return ent && ent == h_unlag_command_ent ? h_unlag_command : (unlag_command_t){ 0 };
+}
+
+static void *h_unlag_extension(const char *name)
+{
+    static const unlag_api_v1_t api = { h_unlag_world, h_unlag_rate, h_unlag_context };
+    return !strcmp(name, UNLAG_API_V1) ? (void *)&api : NULL;
+}
+
+static trace_t q_gameabi h_unlag_clip(const vec3_t start, const vec3_t mins, const vec3_t maxs,
+                                     const vec3_t end, edict_t *ent, int mask)
+{
+    h_unlag_clips++;
+    return he_clip(start, mins, maxs, end, ent, mask);
+}
+
+static const game_import_ex_t h_imports_ex = {
+    .apiversion = GAME_API_VERSION_EX,
+    .structsize = sizeof(h_imports_ex),
+    .clip = h_unlag_clip,
+    .GetExtension = h_unlag_extension,
+};
+#endif
+
 static void h_start(const char *entities)
 {
     char rate[16];
@@ -708,18 +811,30 @@ static void h_start(const char *entities)
     if (h_rate != 10) imp_cvar("sv_features", va("%d", GMF_VARIABLE_FPS), 0);
     imp_cvar("deathmatch", "1", 0);
     imp_cvar("cheats", "1", 0);
+#ifdef HARNESS_ENGINE
+    imp_cvar("maxclients", va("%d", h_maxclients), 0);
+#else
     imp_cvar("maxclients", "4", 0);
+#endif
     imp_cvar("game", HARNESS_MOD, 0);
     imp_cvar("gamedir", HARNESS_MOD, 0);
 #ifdef HARNESS_ENGINE
     /* modelindex of "*N" is N + 1 (the engine hull lookup), 1 is the map */
-    he_load_map(&h_world[0].mins[0], h_nworld, &h_inline[0].mins[0], h_ninline);
+    he_load_map(&h_world[0].mins[0], h_nworld, &h_inline[0].mins[0], h_ninline,
+                h_unlag_fixture ? h_world_contents : NULL, h_unlag_fixture);
     h_models[1] = strdup("maps/harness.bsp");
     for (int k = 1; k <= h_ninline; k++) h_models[k + 1] = strdup(va("*%d", k));
 #endif
     ge = GetGameAPI(&h_imports);
     if (ge->apiversion != 3) imp_error("apiversion %d", ge->apiversion);
+#ifdef HARNESS_ENGINE
+    if (h_unlag_fixture)
+        GetGameAPIEx(&h_imports_ex);
+#endif
     ge->Init();
+#ifdef HARNESS_ENGINE
+    h_unlag_initialized = true;
+#endif
 #ifdef HARNESS_ENGINE
     he_set_game(ge);
 #endif
@@ -776,7 +891,16 @@ static void h_think(edict_t *ent, int buttons, int msec)
     h_cmd_msec += msec;
     if (msec < h_cmd_min) h_cmd_min = msec;
     if (msec > h_cmd_max) h_cmd_max = msec;
+#ifdef HARNESS_ENGINE
+    h_unlag_command_ent = ent;
+    cmd.angles[YAW] = h_unlag_yaw;
+#endif
     ge->ClientThink(ent, &cmd);
+#ifdef HARNESS_ENGINE
+    h_unlag_command_ent = NULL;
+    h_unlag_command = (unlag_command_t){ 0 };
+    h_unlag_yaw = 0;
+#endif
 }
 
 /* One world tick with n usercmds of the given buttons before it (as the
@@ -903,6 +1027,9 @@ static void h_use(edict_t *ent, const char *weapon)
     for (int i = 0; i < 2 * h_rate; i++) h_tick(ent, 0, 1);
 }
 
+#ifdef HARNESS_ENGINE
+#include "unlag.h"
+#endif
 #include "scenarios.h"
 
 #ifdef HARNESS_ENGINE
@@ -920,9 +1047,17 @@ static void h_use(edict_t *ent, const char *weapon)
  * fixture adds one hit per world tick, see sc_t12_rotating_ride) */
 static int h_listed(const char *name)
 {
+#ifdef HARNESS_ENGINE
+    if (!strcmp(name, "unlag_bench") || !strcmp(name, "unlag_bench_dense")) return 0;  /* run explicitly for the paired measurement */
+    if (!strncmp(name, "unlag_", 6)) return h_sched == H_SCHED_TICK;
+#endif
     int mover = !strncmp(name, "t13_", 4) || !strncmp(name, "t14_", 4);
     int crush = !strncmp(name, "t12_", 4) && strcmp(name, "t12_rotating_touch");
     if (h_sched != H_SCHED_TICK) return H_ENGINE && mover;     /* the path ticks follow the schedule */
+    if (!strncmp(name, "t23_", 4)) {
+        int engine_only = !strcmp(name, "t23_movers_wait") || !strcmp(name, "t23_viper_pitch");
+        return H_ENGINE == engine_only;
+    }
     if (!strncmp(name, "t24_", 4)) {
         if (!strcmp(name, "t24_plat_object") || !strcmp(name, "t24_toss_free") ||
             !strcmp(name, "t24_toss_bounce")) return 1;
@@ -952,6 +1087,7 @@ int main(int argc, char **argv)
     }
     for (int i = 0; h_scenarios[i].name; i++) {
         if (strcmp(h_scenarios[i].name, argv[1])) continue;
+        h_scenario = argv[1];
         printf("%s %s @%d Hz%s%s%s\n", HARNESS_MOD, argv[1], h_rate, H_ENGINE ? " (engine collision)" : "",
                h_sched ? ", usercmd schedule " : "", h_sched ? h_sched_names[h_sched] : "");
         if (setjmp(h_abort)) {

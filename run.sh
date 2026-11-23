@@ -173,6 +173,120 @@ api3() {               # api3 MOD SRC_VAR DIR RATES box|engine|sched|toss-rates 
     return $rc
 }
 
+# compare_t23 SCOPE LOG10 LOG_RATE MOD RATE: scope is box, engine, or explicit scenario names.
+# The committed list of scenarios and keys is independent of harness registration.
+# A key with :N compares exactly after removing N steps of dispatch latency.
+compare_t23() {
+    local rate=$5 mod=$4 manifest=t23-observations.txt
+    if [[ $mod == openffa ]]; then manifest=t23-openffa-observations.txt; fi
+    LC_ALL=C awk -v scope="$1" -v mod="$mod" -v rated="$rate" '
+        BEGIN {
+            n = split(scope, names)
+            for (i = 1; i <= n; i++) selected[names[i]] = 1
+        }
+        FILENAME == ARGV[1] {
+            if ($1 != scope && !($2 in selected)) next
+            if (NF < 3 || ($2 in wanted)) {
+                print "FAIL T23 malformed or duplicate expectation: " $0
+                failed = 1
+                next
+            }
+            wanted[$2] = 1
+            n_wanted++
+            for (i = 3; i <= NF; i++) {
+                fields = split($i, spec, ":")
+                if (fields > 2 || !length(spec[1]) || (fields == 2 && spec[2] !~ /^[0-9]+$/)) {
+                    print "FAIL T23 malformed expected observation: " $2 " " $i
+                    failed = 1
+                    continue
+                }
+                key = $2 SUBSEP spec[1]
+                if (key in owner) {
+                    print "FAIL T23 duplicate expected observation: " $2 " " spec[1]
+                    failed = 1
+                }
+                owner[key] = $2
+                label[key] = $2 " " spec[1]
+                if (fields == 2) dispatch[key] = spec[2] + 0
+            }
+            next
+        }
+        $1 == mod && $2 ~ /^t23_.*:$/ && $3 == "PASS" {
+            rate = FILENAME == ARGV[2] ? 10 : rated
+            name = substr($2, 1, length($2) - 1)
+            finished[rate, name]++
+        }
+        $1 == "T23" {
+            rate = FILENAME == ARGV[2] ? 10 : rated
+            key = $2 SUBSEP $3
+            if (!(key in owner) || NF != 5 || $4 !~ /^-?[0-9]+[.][0-9]+$/ ||
+                $5 !~ /^-?[0-9]+$/ || seen[rate, key]++) {
+                print "FAIL T23 unexpected, malformed or duplicate record @" rate ": " $0
+                failed = bad[$2] = 1
+                next
+            }
+            seconds[rate, key] = $4 + 0
+            counts[rate, key] = $5 + 0
+        }
+        END {
+            if (!n_wanted) {
+                print "FAIL T23 empty expected scenario set (" scope ")"
+                failed = 1
+            }
+            if (scope != "box" && scope != "engine")
+                for (name in selected)
+                    if (!(name in wanted)) {
+                        print "FAIL T23 no manifest entry for " name
+                        failed = 1
+                    }
+            for (key in owner) {
+                delta = seconds[rated, key] - seconds[10, key]
+                problem = ""
+                if (!seen[10, key] || !seen[rated, key])
+                    problem = "missing " (!seen[10, key] && !seen[rated, key] ? "@10 and @" rated "" : !seen[10, key] ? "@10" : "@" rated)
+                else if (counts[10, key] != counts[rated, key])
+                    problem = "count " counts[10, key] " != " counts[rated, key]
+                else if (key in dispatch) {
+                    expected = sprintf("%.9f", seconds[10, key] - dispatch[key] * (1/10 - 1/rated))
+                    if (seconds[rated, key] != expected + 0)
+                        problem = "seconds @" rated " " seconds[rated, key] " != " expected " (dispatch steps " dispatch[key] ")"
+                } else if (delta > 0.100000001 || delta < -0.100000001)
+                    problem = "seconds " seconds[10, key] " != " seconds[rated, key]
+                if (problem != "") {
+                    print "FAIL T23 " label[key] ": " problem
+                    failed = bad[owner[key]] = 1
+                }
+            }
+            for (name in wanted) {
+                if (finished[10, name] != 1 || finished[rated, name] != 1) {
+                    print "FAIL T23 " name ": expected one completed PASS at each rate"
+                    failed = bad[name] = 1
+                }
+                if (!bad[name]) print "T23 compare " name ": PASS"
+            }
+            exit (failed ? 1 : 0)
+        }
+    ' "$HERE/mods/api3/$manifest" "$2" "$3"
+}
+
+server_checks() {
+    local group=$1 rate=$2 dir=$OUT/server-$1 case rc=0
+    shift 2
+    need Q2PRO Q2_DATA || return
+    engine_harness client "$OUT/bcl-fps" "$dir" || return 1
+    for case; do
+        CL_GAME="$dir/testgame.so" CL_BASE="$dir/base" CL_RATE="$rate" \
+            timeout -k 5 120 "$dir/driver" "$case" || rc=1
+    done
+    return "$rc"
+}
+
+unlag_sources() {
+    need OPENFFA OPENTDM || return
+    cmp -s "$OPENFFA/g_unlag.c" "$OPENTDM/g_unlag.c" ||
+        { echo "FAIL OpenFFA and OpenTDM g_unlag.c must be byte-identical"; return 1; }
+}
+
 # fleet HOST_ENV PEER...: a real-time listen server of the fork client
 # harness (fleet_host) on a free UDP port and peers "NAME DIR ENV" (fleet_peer)
 # at once; all must pass
@@ -359,6 +473,7 @@ if ((NEGATIVE)); then
 else
 stage capability capability
 stage remote-lerp remote_lerp
+stage unlag-sources unlag_sources
 # the fixed (10 Hz only) engine
 stage scheduler-fixed@10 scheduler "$OUT/bded" "$OUT/sched" 10
 stage client-fixed@10 client "$OUT/bcl" "$OUT/cl" 10 new 0
@@ -378,6 +493,26 @@ for r in $RATES; do
         done
     done
 done
+for r in $RATES; do
+    checks=(shot_time_estimate shot_time_ack_window shot_time_commands shot_time_empty_new_group
+        shot_time_rejected_backup shot_time_nested_think shot_time_lifecycle shot_time_channel_reset
+        shot_time_non_network)
+    ((r == 60)) && checks+=(shot_time_rate_change)
+    stage server-shot-time@$r server_checks shot-time "$r" "${checks[@]}"
+    if ((r > 10)) && [[ " $RATES " == *" 10 "* ]]; then
+        for mod in openffa opentdm; do
+            for fixture in box engine; do
+                stage api3-$mod-timing-$fixture@$r compare_t23 "$fixture" \
+                    "$OUT/log/api3-$mod-$fixture@10.log" "$OUT/log/api3-$mod-$fixture@$r.log" "$mod" "$r"
+            done
+        done
+    fi
+done
+if [[ " $RATES " == *" 60 "* ]]; then
+    stage server-pacing@60 server_checks pacing 60 pacing_single_pause pacing_window_boundary \
+        pacing_unfinished_silence pacing_batch_exclusions pacing_duplicate_datagram pacing_batch_five \
+        pacing_reconnect pacing_new_map pacing_host_hitch
+fi
 # Compare free flight to the 10 Hz reference at the intermediate rates.
 if [[ " $RATES " =~ [[:space:]](20|30|40|50)[[:space:]] ]]; then
     for m in openffa:OPENFFA opentdm:OPENTDM; do

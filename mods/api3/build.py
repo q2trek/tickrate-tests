@@ -120,7 +120,7 @@ def main():
         replace[root / name] = flat
 
     flags = project_flags(build)
-    mod_args = ['-include', str(HERE / 'namespace.h')] + MOD_ARGS[a.mod]
+    mod_args = ['-DUSE_UNLAG', '-include', str(HERE / 'namespace.h')] + MOD_ARGS[a.mod]
     incs = ['-I' + str(build), '-I' + str(root)]
 
     def compile_one(src):

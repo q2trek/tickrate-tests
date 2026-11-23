@@ -47,6 +47,13 @@ Layout
   limiter's first overflow and per-map total, and checks that OpenTDM
   camera kicks decay during a timeout. The pre-fix camera trace outside
   a timeout is compared at its recorded rates of 10 and 60 Hz.
+* The server fixture checks completed pacing windows, shot-time estimates
+  from admitted snapshots, and handling of empty and time-rejected command
+  groups. Timing scenarios compare each rate against 10 Hz using committed
+  observation lists, including exact platform dispatch delays. Engine
+  collision tests cover default-off lag compensation, historical player
+  boxes, shot damage, effects, and rail traversal in both mods. The suite
+  also compares the two copies of `g_unlag.c` byte for byte.
 * `run.sh` builds everything and runs the stages, `controls.txt` lists the
   negative controls.
 
