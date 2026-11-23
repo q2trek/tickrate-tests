@@ -426,6 +426,26 @@ static void hu_rail_overlap(bool both_historical)
 static void sc_unlag_rail_mixed_overlap(void) { hu_rail_overlap(false); }
 static void sc_unlag_rail_history_overlap(void) { hu_rail_overlap(true); }
 
+static void sc_unlag_high_slot(void)
+{
+    hu_scene(33);
+    h_start(h_ents);
+    edict_t *shooter = hu_join_shooter();
+    edict_t *target = hu_join(32, "target");
+    hu_position(shooter, 0, 0, 24);
+    hu_position(target, 512, 0, 24);
+    target->health = 1000;
+    int chosen = h_frames;
+    h_frame();
+    hu_position(target, 512, 64, 24);
+    CHECK(!hu_rail(shooter, target, UNLAG_ESTIMATE, chosen, 0),
+          "the current ray misses client slot 32");
+    int clips = h_unlag_clips;
+    imp_cvar_set("g_unlag", "1");
+    CHECK(hu_rail(shooter, target, UNLAG_ESTIMATE, chosen, 0) == 100 && h_unlag_clips == clips + 1,
+          "slot 0 hits the historical box of client slot 32");
+}
+
 static uint32_t hu_recipients(int type, int from)
 {
     uint32_t recipients = 0;
@@ -521,7 +541,7 @@ static void sc_unlag_water(void)
     vec3_t start = { 272, -120, 36 }, forward = { 1, 0, 0 };
     hu_srand(123);
     hu_fire_pellets(shooter, start, forward, 8, 500, DEFAULT_DEATHMATCH_SHOTGUN_COUNT, &shot);
-    CHECK(shot.rewind && !shot.hits, "spread in water misses every historical box");
+    CHECK(shot.age > 0 && !shot.hits, "spread in water misses every historical box");
     for (int i = 0; i < HU_COUNT(players); i++) {
         CHECK(players[i]->health == health[i] && players[i]->linkcount == links[i] && players[i]->solid == solids[i],
               "miss preserves slot %d health, linkcount and solid", i);
@@ -697,7 +717,7 @@ static void sc_unlag_history(void)
 
 static trace_t hu_trace(int frame, edict_t *shooter, vec3_t start, vec3_t end, int mask)
 {
-    unlag_shot_t shot = { .rewind = true, .frame = frame };
+    unlag_shot_t shot = { .age = 1, .frame = frame };
     vec3_t damage_point;
     return G_UnlagTrace(&shot, shooter, start, end, shooter, mask, damage_point);
 }
@@ -818,6 +838,7 @@ static void sc_unlag_lifetimes(void)
     h_frame();
     hu_position(target, 512, 64, 34);
     hu_position(shooter, 0, 400, 34);
+    int teleported = h_frames;
     CHECK(hu_rail(shooter, target, UNLAG_ESTIMATE, chosen, 0) == 0 &&
           shooter->s.event == EV_PLAYER_TELEPORT && shooter->s.origin[1] == 0,
           "attack command teleported the shooter and missed the former target position");
@@ -831,8 +852,12 @@ static void sc_unlag_lifetimes(void)
     CHECK(h_unlag_lines == before + 1 && target->health == 1000, "next weapon step still has no estimate");
     hu_log(0, -1, 0, 0, 0);
     shooter->s.event = EV_PLAYER_TELEPORT;  /* same-world notification has not yet been cleared */
-    CHECK(hu_rail(shooter, target, UNLAG_ESTIMATE, chosen, 0) == 100,
-          "the next real command refreshes the estimate even while the event is set");
+    CHECK(hu_rail(shooter, target, UNLAG_ESTIMATE, chosen, 0) == 0,
+          "a new command cannot rewind before the shooter teleported");
+    hu_log(0, -1, 0, 0, 0);
+    hu_position(target, 512, 128, 34);
+    CHECK(hu_rail(shooter, target, UNLAG_ESTIMATE, teleported, 64) == 100,
+          "a fresh estimate can hit the target pose from the first frame of this life");
 
     int before_teleport = h_frames;
     hu_position(target, 512, 0, 34);
@@ -1105,7 +1130,7 @@ static void hu_bench(bool dense)
         hu_arm(ent, "Super Shotgun");
         hu_command(ent, 0, UNLAG_ESTIMATE, chosen, 0);
         unlag_shot_t shot = G_UnlagBeginShot(ent);
-        estimates += shot.estimated && shot.rewind && shot.frame == chosen;
+        estimates += shot.estimated && shot.age > 0 && shot.frame == chosen;
     }
     CHECK(records == PLAYERS * HISTORY && estimates == PLAYERS,
           "history and estimates verified before timing (%d records, %d estimates)", records, estimates);
@@ -1231,7 +1256,7 @@ static void sc_unlag_match_start(void)
     h_frame();
     imp_cvar_set("g_unlag", "2");
     hu_command(shooter, 0, UNLAG_ESTIMATE, chosen, 0);
-    CHECK(G_UnlagHistory(target, chosen) && G_UnlagBeginShot(shooter).rewind,
+    CHECK(G_UnlagHistory(target, chosen) && G_UnlagBeginShot(shooter).age > 0,
           "before match reset, target history and shooter estimate are usable");
 
     TDM_ResetLevel();
@@ -1243,7 +1268,7 @@ static void sc_unlag_match_start(void)
     chosen = h_frames;
     h_frame();
     hu_command(shooter, 0, UNLAG_ESTIMATE, chosen, 0);
-    CHECK(G_UnlagHistory(target, chosen) && G_UnlagBeginShot(shooter).rewind,
+    CHECK(G_UnlagHistory(target, chosen) && G_UnlagBeginShot(shooter).age > 0,
           "before countdown ends, target history and shooter estimate are usable again");
 
     tdm_match_status = MM_COUNTDOWN;

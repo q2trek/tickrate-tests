@@ -3616,6 +3616,38 @@ static void sc_t24_toss_land(void)
 
 #endif
 
+static void sc_t24_toss_wall_toggle(void)
+{
+    h_scene_base();
+    int model = h_add_inline(-32, 1968, 128, 32, 2032, 192);
+    h_ent("{\n\"classname\" \"func_wall\"\n\"model\" \"*%d\"\n\"spawnflags\" \"7\"\n}\n", model);
+    h_start(h_ents);
+    edict_t *player = h_join(0, "p1");
+    edict_t *wall = h_by_model("*1");
+    if (!wall || !wall->use)
+        imp_error("toggleable wall did not spawn");
+
+    for (int phase = 0; phase < h_div; phase++) {
+        vec3_t start = { 0, 2000, 196 }, zero = { 0 };
+        edict_t *obj = h_toss_spawn(player, 0, start, zero, 30);
+        for (int tick = 0; tick < h_rate && !obj->groundentity; tick++)
+            h_frame();
+        CHECK(obj->groundentity == wall, "phase %d: grenade rests on the wall", phase);
+        while (h_frames % h_div != phase)
+            h_frame();
+
+        float z = obj->s.origin[2];
+        wall->use(wall, player, player);
+        CHECK(wall->inuse && wall->solid == SOLID_NOT, "phase %d: wall switched off without freeing it", phase);
+        h_frame();
+        CHECK(!obj->groundentity && obj->s.origin[2] < z,
+              "phase %d: grenade falls on the first tick after wall toggle (height change %.6f)",
+              phase, obj->s.origin[2] - z);
+        G_FreeEdict(obj);
+        wall->use(wall, player, player);
+    }
+}
+
 #ifdef HARNESS_ENGINE
 static void sc_t24_toss_edge(void)
 {
@@ -3630,6 +3662,66 @@ static void sc_t24_toss_edge(void)
           fabsf(obj->s.origin[2] - 192.03125f) <= H_EPS,
           "fractional edge: contact in first 100 ms, got %d hits at z %.9g (hit tick %d, ground %d)",
           toss_events.count, obj->s.origin[2], toss_events.hits[0].tick, obj->groundentity == EDICT(0));
+}
+
+static vec3_t h_outer_corner_normal;
+static edict_t *h_outer_corner_hit;
+
+static void h_outer_corner_touch(edict_t *ent, edict_t *other, cplane_t *plane, csurface_t *surface)
+{
+    if (!toss_events.count && plane) {
+        h_outer_corner_hit = other;
+        VectorCopy(plane->normal, h_outer_corner_normal);
+    }
+    h_toss_touch(ent, other, plane, surface);
+}
+
+static void sc_t24_toss_outer_corner(void)
+{
+    h_scene_base();
+    h_add_world(2000, 0, 64, 2300, 300, 192);
+    h_start(h_ents);
+    edict_t *player = h_join(0, "p1");
+    vec3_t start = { 1990, -10, 128 }, velocity = { 200, 199.9998f, 0 };
+    edict_t *obj = h_toss_spawn(player, 0, start, velocity, 30);
+    CHECK(VectorCompare(obj->mins, vec3_origin) && VectorCompare(obj->maxs, vec3_origin),
+          "outer corner fixture uses a point grenade");
+    obj->touch = h_outer_corner_touch;
+    h_frames_n(h_div);
+    CHECK(toss_events.count == 1 && h_outer_corner_hit == EDICT(0) && h_outer_corner_normal[0] == 0 &&
+          h_outer_corner_normal[1] == -1 && h_outer_corner_normal[2] == 0 &&
+          fabsf(obj->velocity[0] - 200) <= H_EPS &&
+          fabsf(obj->velocity[1] + 100) <= 0.001f && fabsf(obj->velocity[2] + 80) <= H_EPS,
+          "outer corner uses the classic Y face: normal (%g, %g, %g), outgoing (%.7g, %.7g, %.7g), %d hit(s)",
+          h_outer_corner_normal[0], h_outer_corner_normal[1], h_outer_corner_normal[2],
+          obj->velocity[0], obj->velocity[1], obj->velocity[2], toss_events.count);
+    G_FreeEdict(obj);
+
+    // At 10 and 20 Hz, the grenade reaches the corner on the first tick.
+    if (h_div <= 2)
+        return;
+    obj = h_toss_spawn(player, 0, start, velocity, 30);
+    obj->touch = h_outer_corner_touch;
+    h_frame();
+    edict_t *blocker = G_Spawn();
+    blocker->solid = SOLID_BBOX;
+    float x = (obj->s.origin[0] + 2000) * 0.5f;
+    VectorSet(blocker->s.origin, x, x - 2000, 128);
+    VectorSet(blocker->mins, -0.5f, -1, -8);
+    VectorSet(blocker->maxs, 0.5f, 1, 8);
+    gi.linkentity(blocker);
+    h_frames_n(h_div - 1);
+    CHECK(toss_events.count == 1 && h_outer_corner_hit == blocker && h_outer_corner_normal[0] == -1,
+          "a closer entity entering the path wins over the world corner");
+    G_FreeEdict(obj);
+    G_FreeEdict(blocker);
+
+    obj = h_toss_spawn(player, 0, start, velocity, 30);
+    h_frame();
+    obj->velocity[1] = 0;
+    h_frames_n(h_div - 1);
+    CHECK(!toss_events.count && obj->s.origin[0] > 2000 && obj->s.origin[1] < 0,
+          "changing velocity between ticks lets the grenade miss the world corner");
 }
 
 static void sc_t24_toss_drop(void)
@@ -6265,8 +6357,10 @@ static const struct { const char *name; void (*run)(void); } h_scenarios[] = {
 #endif
     { "t24_toss_free", sc_t24_toss_free },
     { "t24_toss_bounce", sc_t24_toss_bounce },
+    { "t24_toss_wall_toggle", sc_t24_toss_wall_toggle },
 #ifdef HARNESS_ENGINE
     { "t24_toss_edge", sc_t24_toss_edge },
+    { "t24_toss_outer_corner", sc_t24_toss_outer_corner },
     { "t24_toss_drop", sc_t24_toss_drop },
 #else
     { "t24_toss_head", sc_t24_toss_head },
@@ -6320,6 +6414,7 @@ static const struct { const char *name; void (*run)(void); } h_scenarios[] = {
     { "unlag_rail_row", sc_unlag_rail_row },
     { "unlag_rail_mixed_overlap", sc_unlag_rail_mixed_overlap },
     { "unlag_rail_history_overlap", sc_unlag_rail_history_overlap },
+    { "unlag_high_slot", sc_unlag_high_slot },
     { "unlag_water", sc_unlag_water },
     { "unlag_shotgun_kill", sc_unlag_shotgun_kill },
     { "unlag_stationary_kill", sc_unlag_stationary_kill },

@@ -53,7 +53,9 @@ Layout
   observation lists, including exact platform dispatch delays. Engine
   collision tests cover default-off lag compensation, historical player
   boxes, shot damage, effects, and rail traversal in both mods. The suite
-  also compares the two copies of `g_unlag.c` byte for byte.
+  also checks shooter lifetime and client slot 32, tests tosses at
+  toggled walls and outer corners, and compares the two copies of
+  `g_unlag.c` byte for byte.
 * `run.sh` builds everything and runs the stages, `controls.txt` lists the
   negative controls.
 

@@ -135,10 +135,10 @@ neg-remote-pause | q2pro/src/client/remote_lerp.c | remote | 60 | * | s/} else i
 neg-remote-cap | q2pro/src/client/remote_lerp.c | remote | 60 | * | s/r->P = fminf(r->P, rec(r, 0)->s.t);/(void)0;/
 
 # moving platform support, classic toss trajectories, and crush overflow logs
-neg-openffa-plat-object | openffa/g_main.c | api3:engine | 60 | t24_plat_object | /if ((ent->groundentity)/,/ClientBeginServerFrame(ent);/s/} else if (FRAMESYNC || ent->groundentity->client) {/} else {/
+neg-openffa-plat-object | openffa/g_main.c | api3:engine | 60 | t24_plat_object | /if ((ent->groundentity)/,/ClientBeginServerFrame(ent);/s/} else if (FRAMESYNC || ent->groundentity->client ||/} else if (true || ent->groundentity->client ||/
 neg-openffa-toss-gravity | openffa/g_phys.c | api3:box | 60 | t24_toss_free | /if (toss && remaining == step_frames)/,+1{s/ && remaining == step_frames//;s/ \* TOSS_STEP_TIME;/ * FRAMETIME;/;}
 neg-openffa-crush-count | openffa/g_utils.c | api3:box | 60 | t24_crush_overflow_count | s/++level.crush_overflows/level.crush_overflows/
-neg-opentdm-plat-object | opentdm/g_main.c | api3:engine | 60 | t24_plat_object | /if ((ent->groundentity)/,/ClientBeginServerFrame(ent);/s/} else if (FRAMESYNC || ent->groundentity->client) {/} else {/
+neg-opentdm-plat-object | opentdm/g_main.c | api3:engine | 60 | t24_plat_object | /if ((ent->groundentity)/,/ClientBeginServerFrame(ent);/s/} else if (FRAMESYNC || ent->groundentity->client ||/} else if (true || ent->groundentity->client ||/
 neg-opentdm-toss-gravity | opentdm/g_phys.c | api3:box | 60 | t24_toss_free | /if (toss && remaining == step_frames)/,+1{s/ && remaining == step_frames//;s/ \* TOSS_STEP_TIME;/ * FRAMETIME;/;}
 neg-opentdm-crush-count | opentdm/g_utils.c | api3:box | 60 | t24_crush_overflow_count | s/++level.crush_overflows/level.crush_overflows/
 
@@ -157,7 +157,17 @@ neg-opentdm-drown | opentdm/p_view.c | api3:box | 60 | t23_drowning | s/+ SECS_T
 neg-openffa-edict-reuse | openffa/g_utils.c | api3:box | 60 | t23_edict_reuse | s/return level\.framenum - ent->freed_framenum > HZ \/ 2;/return level.time - (float)(ent->freed_framenum * FRAMETIME) > 0.5f;/
 
 # Hitscan history and rail traversal.
-neg-openffa-unlag | openffa/g_unlag.c | api3:engine | 60 | unlag_rail | s/shot.rewind = shot.age > 0;/shot.rewind = false;/
-neg-opentdm-unlag | opentdm/g_unlag.c | api3:engine | 60 | unlag_rail | s/shot.rewind = shot.age > 0;/shot.rewind = false;/
+neg-openffa-unlag | openffa/g_unlag.c | api3:engine | 60 | unlag_rail | s/^    shot.age = min(shot.estimate_age, limit);$/    shot.age = min(0, limit);/
+neg-opentdm-unlag | opentdm/g_unlag.c | api3:engine | 60 | unlag_rail | s/^    shot.age = min(shot.estimate_age, limit);$/    shot.age = min(0, limit);/
 neg-openffa-unlag-rail | openffa/g_unlag.c | api3:engine | 60 | unlag_rail_mixed_overlap | s/^        rail->passed\[rail->count++\].ent = ignore;$/        (void)ignore;/
 neg-opentdm-unlag-rail | opentdm/g_unlag.c | api3:engine | 60 | unlag_rail_mixed_overlap | s/^        rail->passed\[rail->count++\].ent = ignore;$/        (void)ignore;/
+neg-openffa-unlag-shooter-life | openffa/g_unlag.c | api3:engine | 60 | unlag_lifetimes | s/slot->command_frame < slot->life_frame || //
+neg-openffa-unlag-high-slot | openffa/g_unlag.c | api3:engine | 60 | unlag_high_slot | s/i <= game.maxclients; i++)/i <= game.maxclients \&\& i <= 32; i++)/
+neg-opentdm-unlag-shooter-life | opentdm/g_unlag.c | api3:engine | 60 | unlag_lifetimes | s/slot->command_frame < slot->life_frame || //
+neg-opentdm-unlag-high-slot | opentdm/g_unlag.c | api3:engine | 60 | unlag_high_slot | s/i <= game.maxclients; i++)/i <= game.maxclients \&\& i <= 32; i++)/
+
+# Toss support and world impact.
+neg-openffa-toss-wall-toggle | openffa/g_main.c | api3:engine | 60 | t24_toss_wall_toggle | s/ent->groundentity->solid == SOLID_NOT) \{/false) {/
+neg-openffa-toss-world-face | openffa/g_phys.c | api3:engine | 60 | t24_toss_outer_corner | s/else if (ent->toss_world_steps)/else if (0)/
+neg-opentdm-toss-wall-toggle | opentdm/g_main.c | api3:engine | 60 | t24_toss_wall_toggle | s/ent->groundentity->solid == SOLID_NOT) \{/false) {/
+neg-opentdm-toss-world-face | opentdm/g_phys.c | api3:engine | 60 | t24_toss_outer_corner | s/else if (ent->toss_world_steps)/else if (0)/

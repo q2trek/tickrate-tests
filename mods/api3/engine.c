@@ -329,12 +329,14 @@ static uint32_t he_recipients;
 
 static void he_receive(client_t *client, const byte *data, size_t len, bool reliable)
 {
-    he_recipients |= UINT32_C(1) << client->number;
+    // The multicast assertions inspect the first 32 slots.
+    if (client->number < 32)
+        he_recipients |= UINT32_C(1) << client->number;
 }
 
 uint32_t he_multicast(const vec3_t origin, multicast_t mode, const byte *data, size_t len, int maxclients)
 {
-    static client_t clients[32];
+    static client_t clients[MAX_CLIENTS];
     Q_assert(maxclients <= q_countof(clients));
     Q_assert(LIST_EMPTY(&sv_clientlist));
     for (int i = 0; i < maxclients; i++) {
