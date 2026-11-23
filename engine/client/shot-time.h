@@ -240,16 +240,19 @@ static void shot_time_empty_new_group(void)
         return;
     h_shot_time_snapshot_t snapshot = h_shot_time_next(client);
     client->pacing.window.batch = 0;   /* exclude packets from joining */
-    h_shot_time_ack(snapshot.number, UNLAG_ESTIMATE, snapshot.world - h_rate / H_CRATE, "command A");
     int start = h_thinks;
-    h_shot_time_move(snapshot.number, 1, 0, 0, 100);
-    CHECK(h_thinks == start && !client->lastcmd_unseen, "empty new group leaves executed A eligible for repeat");
+    int frame = snapshot.world - h_rate / H_CRATE;
+    h_shot_time_ack(snapshot.number, UNLAG_ESTIMATE, frame, "command A");
     h_shot_time_move(snapshot.number, 1, 0, 0, 4321);
-    CHECK(h_thinks == start && client->lastcmd.angles[1] == 100, "unused backup does not replace A");
+    CHECK(h_thinks == start + 1, "parsing the unused backup leaves the module's estimate from A alone");
     h_shot_time_move(snapshot.number, 0, 1, 1, 200);
-    CHECK(h_thinks == start + 2 && h_think_cmds[start & 511].angles[1] == 100,
-          "server repeated A before running the next new command");
-    h_shot_time_expect(start, UNLAG_REPEAT, 0, "repeat after an empty new group");
+    int a = h_think_cmds[start & 511].angles[1];
+    int b = h_think_cmds[(start + 1) & 511].angles[1];
+    int c = h_think_cmds[(start + 2) & 511].angles[1];
+    CHECK(h_thinks == start + 3 && a == 100 && b == 4321 && c == 200,
+          "legacy packet sequence: module saw %d, %d, %d; expected 100, 4321, 200", a, b, c);
+    h_shot_time_expect(start + 1, UNLAG_NO_ESTIMATE, 0, "first execution of the unused backup");
+    h_shot_time_expect(start + 2, UNLAG_ESTIMATE, frame, "command C");
 
     gclient_new_t *gc = client->edict->client;
     gc->ps.pmove.velocity[0] = 100;
@@ -260,6 +263,17 @@ static void shot_time_empty_new_group(void)
     pacing_maxima_t status = pacing_read();
     CHECK(status.present && status.batch == 1 && status.held == 3,
           "completed status n: heldfrm=%u batch=%u (expected 3 and 1)", status.held, status.batch);
+
+    snapshot = h_shot_time_next(client);
+    start = h_thinks;
+    h_shot_time_move(snapshot.number, 1, 0, 1, 5432);
+    CHECK(h_thinks == start + 1 && h_think_cmds[start & 511].angles[1] == 5432,
+          "packet loss recovered the backup from the empty new group");
+    h_shot_time_expect(start, UNLAG_ESTIMATE, snapshot.world - h_rate / H_CRATE, "recovered backup");
+    h_shot_time_move(snapshot.number, 0, 1, 1, 300);
+    CHECK(h_thinks == start + 3 && h_think_cmds[(start + 1) & 511].angles[1] == 5432,
+          "next packet repeated the recovered backup");
+    h_shot_time_expect(start + 1, UNLAG_REPEAT, 0, "repeat of the executed backup");
 }
 
 static void shot_time_rejected_backup(void)

@@ -148,8 +148,8 @@ neg-opentdm-view-timeout | opentdm/p_view.c | api3:engine | 60 | t24_view_timeou
 # Server packet pacing, shot-time estimates and backup command handling.
 neg-pacing-hold | q2pro/src/server/main.c | client | 60 | pacing_single_pause | s/cl->pacing.window.held_frames = .*;/cl->pacing.window.held_frames = 0;/
 neg-shot-time | q2pro/src/server/user.c | client | 60 | shot_time_estimate | s/^        UNLAG_ESTIMATE,$/        UNLAG_NO_ESTIMATE,/
-neg-empty-new-group | q2pro/src/server/user.c | client | 60 | shot_time_empty_new_group | /^    if (lastcmd) {/i\    if (!lastcmd \&\& numDups \&\& numCmds[0]) lastcmd = \&cmds[0][0];
-neg-rejected-backup | q2pro/src/server/user.c | client | 60 | shot_time_rejected_backup | s/^    if (lastcmd) {/    if (lastcmd \&\& (numCmds[numDups] || lastcmd_seen)) {/
+neg-empty-new-group | q2pro/src/server/user.c | client | 60 | shot_time_empty_new_group | /^    sv_client->lastcmd = \*lastcmd;$/i\    if (!numCmds[numDups] && !sv_client->netchan.dropped) return;
+neg-rejected-backup | q2pro/src/server/user.c | client | 60 | shot_time_rejected_backup | s/= last_executed != lastcmd;/= last_executed != lastcmd \&\& !(sv_client->netchan.dropped > 0 \&\& !numCmds[numDups]);/
 
 # Environment and entity reuse on the classic clock.
 neg-openffa-drown | openffa/p_view.c | api3:box | 60 | t23_drowning | s/+ 1 \* HZ + FRAMEDIV - 1;/+ 1 * HZ;/
@@ -167,7 +167,7 @@ neg-opentdm-unlag-shooter-life | opentdm/g_unlag.c | api3:engine | 60 | unlag_li
 neg-opentdm-unlag-high-slot | opentdm/g_unlag.c | api3:engine | 60 | unlag_high_slot | s/i <= game.maxclients; i++)/i <= game.maxclients \&\& i <= 32; i++)/
 
 # Toss support and world impact.
-neg-openffa-toss-wall-toggle | openffa/g_main.c | api3:engine | 60 | t24_toss_wall_toggle | s/ent->groundentity->solid == SOLID_NOT) \{/false) {/
+neg-openffa-toss-wall-toggle | openffa/g_main.c | api3:engine | 60 | t24_toss_wall_toggle | s/ent->groundentity->solid == SOLID_NOT) {/false) {/
 neg-openffa-toss-world-face | openffa/g_phys.c | api3:engine | 60 | t24_toss_outer_corner | s/else if (ent->toss_world_steps)/else if (0)/
-neg-opentdm-toss-wall-toggle | opentdm/g_main.c | api3:engine | 60 | t24_toss_wall_toggle | s/ent->groundentity->solid == SOLID_NOT) \{/false) {/
+neg-opentdm-toss-wall-toggle | opentdm/g_main.c | api3:engine | 60 | t24_toss_wall_toggle | s/ent->groundentity->solid == SOLID_NOT) {/false) {/
 neg-opentdm-toss-world-face | opentdm/g_phys.c | api3:engine | 60 | t24_toss_outer_corner | s/else if (ent->toss_world_steps)/else if (0)/
