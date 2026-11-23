@@ -38,8 +38,15 @@ Layout
   every rate and under several usercmd schedules. OpenTDM scenarios also
   check the 200 ms ghost limit, ping jitter, fixed-engine fallback and real
   100 ms view feedback (including timeout and environment damage on resume).
-  The `engine` variant links
-  the q2pro collision code and a generated BSP.
+  The `engine` variant links the q2pro collision code and a generated BSP.
+  The box and engine fixtures check objects riding a moving platform and
+  compare free flight and bounces with a recorded 10 Hz reference. Further
+  cases cover bounce hold and spin, landing, head reuse, contact at the
+  end of a step, falls from rest, jump pads, projectiles without gravity
+  and a throw across an OpenTDM timeout. The harness also checks the crush
+  limiter's first overflow and per-map total, and checks that OpenTDM
+  camera kicks decay during a timeout. The pre-fix camera trace outside
+  a timeout is compared at its recorded rates of 10 and 60 Hz.
 * `run.sh` builds everything and runs the stages, `controls.txt` lists the
   negative controls.
 

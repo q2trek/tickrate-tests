@@ -2786,6 +2786,1008 @@ static void sc_t18_kick_timeout(void)
 }
 #endif
 
+/* ---------------------------------------------------------------- T24 */
+
+enum { H_PLAT_GRENADE, H_PLAT_HAND_GRENADE, H_PLAT_ITEM };
+
+static edict_t *h_plat_object(edict_t *player, edict_t *plat, int kind)
+{
+    vec3_t start = { 8, 2000, plat->absmax[2] - 1 + 4 }, dir = { 1, 0, 0 };
+#ifdef HARNESS_OPENTDM
+    float fuse = 30;
+#else
+    int fuse = 30 * h_rate;
+#endif
+    edict_t *obj;
+    if (kind == H_PLAT_ITEM) {
+        obj = Drop_Item(player, FindItem("Shells"));
+    } else if (kind == H_PLAT_GRENADE) {
+        fire_grenade(player, start, dir, 120, 0, fuse, 160);
+        obj = h_by_class("grenade", 0);
+    } else {
+        fire_grenade2(player, start, dir, 125, 0, fuse, 165, false);
+        obj = h_by_class("hgrenade", 0);
+    }
+    if (!obj) imp_error("platform object did not spawn");
+    VectorCopy(start, obj->s.origin);
+    obj->s.origin[2] -= obj->mins[2];
+    VectorCopy(obj->s.origin, obj->old_origin);
+    VectorClear(obj->velocity);
+    gi.linkentity(obj);
+    return obj;
+}
+
+static void h_plat_object_ride(edict_t *plat, edict_t *obj, const char *name, int before)
+{
+    struct { int ticks, steps, sounds, off_step; } leg[2] = { 0 };
+    float offset = obj->s.origin[2] - plat->s.origin[2], drift = 0;
+    int lost = 0;
+    for (int i = 0; i < 12 * h_rate; i++) {
+        float z = plat->s.origin[2];
+        int sound0 = h_nsounds, classic_step = FRAMESYNC;
+        h_frame();
+        float dz = plat->s.origin[2] - z;
+        if (dz) {
+            int down = dz < 0;
+            leg[down].ticks++;
+            leg[down].steps += classic_step;
+            for (int j = sound0; j < h_nsounds; j++) {
+                if (h_sounds_log[j].entnum != NUM(obj)) continue;
+                leg[down].sounds++;
+                leg[down].off_step += !classic_step;
+            }
+        }
+        lost += obj->groundentity != plat;
+        drift = fmaxf(drift, fabsf(obj->s.origin[2] - plat->s.origin[2] - offset));
+        if (leg[1].ticks && plat->moveinfo.state == H_STATE_BOTTOM) break;
+    }
+    CHECK(!lost && drift <= 0.125f + H_EPS, "%s: %d ticks without platform support, max height change %.4f",
+          name, lost, drift);
+    for (int down = 0; down < 2; down++) {
+        /* At 10 Hz a full leg has 16 impact sounds, or 15 when the object runs first. */
+        int baseline = !strcmp(name, "item") ? 0 : 16 - before;
+        int sounds = leg[down].sounds, ticks = leg[down].ticks;
+        /* Intermediate rates can put an extra 100 ms step inside the moving leg. */
+        int recorded = h_rate == 10 || h_rate == 60;
+        int reference = baseline && !recorded ? leg[down].steps : baseline;
+        int allowance = reference && h_rate != 10;
+        CHECK(ticks >= h_rate && !leg[down].off_step && abs(sounds - reference) <= allowance &&
+              sounds <= ticks / h_div + 1,
+              "%s %s: %d sounds in %d ticks (%s %d, %d sounds between 100 ms steps)",
+              name, down ? "down" : "up", sounds, ticks, recorded ? "10 Hz reference" : "reference from moving ticks",
+              reference, leg[down].off_step);
+    }
+    CHECK(plat->moveinfo.state == H_STATE_BOTTOM, "%s: platform returned to bottom", name);
+}
+
+static void h_plat_object_lose_support(edict_t *plat, edict_t *obj, int phase)
+{
+    /* Move the support sideways without carrying its rider. */
+    float z = obj->s.origin[2];
+    plat->s.origin[0] += 256;
+    gi.linkentity(plat);
+    int falling = 0;
+    for (int i = 0; i < h_div && !falling; i++) {
+        h_frame();
+        falling = !obj->groundentity && obj->s.origin[2] < z;
+    }
+    CHECK(falling, "a support moved away drops its rider within %d ticks", h_div);
+
+    plat->s.origin[0] -= 256;
+    gi.linkentity(plat);
+    obj->s.origin[2] = plat->absmax[2] - 1 + 4 - obj->mins[2];
+    VectorClear(obj->velocity);
+    gi.linkentity(obj);
+    h_frames_n(h_rate);
+#ifdef HARNESS_OPENTDM
+    while (level.realframenum % h_div != phase) h_frame();
+#else
+    while (level.framenum % h_div != phase) h_frame();
+#endif
+    CHECK(obj->groundentity == plat, "rider settled again before support removal");
+    z = obj->s.origin[2];
+    G_FreeEdict(plat);
+    h_frame();
+    CHECK(!obj->groundentity && obj->s.origin[2] < z, "removing support drops rider in the same tick (phase %d)", phase);
+}
+
+static void sc_t24_plat_object(void)
+{
+    h_scene_base();
+    int model = h_add_inline(-64, 1936, 256, 64, 2064, 320);
+    h_ent("{\n\"classname\" \"func_plat\"\n\"model\" \"*%d\"\n\"height\" \"256\"\n}\n", model);
+    h_start(h_ents);
+    static const char *const names[] = { "grenade", "hand grenade", "item" };
+    for (int kind = H_PLAT_GRENADE; kind <= H_PLAT_ITEM; kind++) {
+        for (int before = 0; before < 2; before++) {
+            if (kind || before) {
+#ifdef HARNESS_ENGINE
+                he_set_game(ge);   /* Clear the outgoing map's collision links before reusing edicts. */
+#endif
+                ge->SpawnEntities("harness", h_ents, "");
+            }
+            edict_t *plat = h_by_model("*1"), *player = h_join(0, "p1");
+            edict_t *trigger = NULL;
+            for (int n = 1; n < ge->num_edicts; n++) {
+                edict_t *ent = EDICT(n);
+                if (ent->inuse && ent->solid == SOLID_TRIGGER && ent->enemy == plat) trigger = ent;
+            }
+            if (!plat || !trigger) imp_error("platform or trigger did not spawn");
+            if (before) {
+                /* Reuse the slot of the unused single-player spawn point. */
+                G_FreeEdict(h_by_class("info_player_start", 0));
+                h_frames_n(3 * h_rate);
+            }
+            edict_t *obj = h_plat_object(player, plat, kind);
+            CHECK((NUM(obj) < NUM(plat)) == before, "%s: object %d, platform %d", names[kind], NUM(obj), NUM(plat));
+            h_frames_n(h_rate);
+            CHECK(obj->groundentity == plat, "%s settled on platform", names[kind]);
+            trigger->touch(trigger, player, NULL, NULL);
+            h_plat_object_ride(plat, obj, names[kind], before);
+            h_plat_object_lose_support(plat, obj, (kind * 2 + before) % h_div);
+        }
+    }
+}
+
+#ifdef HARNESS_OPENTDM
+static edict_t *h_view_player(void)
+{
+    edict_t *a, *b;
+    h_set_override("g_timeout_limit", "0");
+    h_tdm_pair(&a, &b);
+    if (!h_tdm_start(a, b)) return NULL;
+    h_place(a, 200, 0, 24);
+    h_tick(a, 0, 1);
+    h_place(b, 0, 0, 24);
+    h_tick(b, 0, 1);
+    h_frames_n(h_rate);
+    return a;
+}
+
+static void h_view_pause(edict_t *p)
+{
+    h_client_command(p, "time");
+    CHECK(tdm_match_status == MM_TIMEOUT, "timeout started (status %d)", tdm_match_status);
+}
+
+static void h_view_resume(edict_t *p)
+{
+    h_client_command(p, "time");
+    for (int i = 0; i < 15 * h_rate && tdm_match_status == MM_TIMEOUT; i++) h_frame();
+    CHECK(tdm_match_status == MM_PLAYING, "match resumed (status %d)", tdm_match_status);
+}
+
+static void h_view_sync(void)
+{
+    while (!FRAMESYNC) h_frame();
+}
+
+static int h_view_neutral(edict_t *p)
+{
+    player_state_t *ps = &p->client->ps;
+    return VectorCompare(ps->kick_angles, vec3_origin) && ps->viewoffset[2] == p->viewheight;
+}
+
+static void sc_t24_view_timeout_fall(void)
+{
+    edict_t *p = h_view_player();
+    if (!p) return;
+    player_state_t *ps = &p->client->ps;
+    h_place(p, 200, 0, 24 + 512);
+    for (int i = 0; i < 3 * h_rate && !ps->kick_angles[PITCH]; i++) h_tick(p, 0, 1);
+    CHECK(p->groundentity && ps->kick_angles[PITCH] > 0 && ps->viewoffset[2] < p->viewheight,
+          "landed with fall pitch %.4f and view height %.4f", ps->kick_angles[PITCH], ps->viewoffset[2]);
+    h_view_pause(p);
+    h_frames_n(3 * h_div);
+    CHECK(h_view_neutral(p), "fall recovers in 0.3 s of timeout (pitch %.4f, height %.4f, want 0 and %d)",
+          ps->kick_angles[PITCH], ps->viewoffset[2], p->viewheight);
+    int tilted = 0;
+    h_client_command(p, "time");
+    for (int i = 0; i < 15 * h_rate && tdm_match_status == MM_TIMEOUT; i++) {
+        h_frame();
+        tilted += !h_view_neutral(p);
+    }
+    CHECK(tdm_match_status == MM_PLAYING && !tilted, "view stays neutral until resume (%d tilted ticks)", tilted);
+    for (int i = 0; i < h_rate; i++) {
+        h_tick(p, 0, 1);
+        tilted += !h_view_neutral(p);
+    }
+    CHECK(!tilted, "fall kick does not return after resume (%d tilted ticks since recovery)", tilted);
+}
+
+static void h_view_damage(edict_t *p)
+{
+    edict_t *attacker = EDICT(2);
+    vec3_t dir = { -1, 0, 0 }, point, normal = { 0, 0, 0 }, velocity;
+    VectorCopy(p->s.origin, point);
+    point[0] += 100;
+    point[1] += 100;
+    int health = p->health;
+    VectorCopy(p->velocity, velocity);
+    T_Damage(p, attacker, attacker, dir, point, normal, 10, 20, DAMAGE_NO_KNOCKBACK, MOD_RAILGUN);
+    CHECK(p->health == health - 10 && VectorCompare(velocity, p->velocity),
+          "damage hit for 10 health without changing velocity");
+}
+
+/* Wait for the projectile: the BFG muzzleflash is the start of the windup. */
+static int h_view_bfg(edict_t *p)
+{
+    h_give(p, "bfg10k", 0);
+    h_give(p, "cells", 100);
+    h_use(p, "bfg10k");
+    h_view_sync();
+    int ammo = h_ammo(p);
+    int fired = 0;
+    for (int i = 0; i < 3 * h_rate && !fired; i++) {
+        init_genrand(1); /* Pin the random BFG roll before each possible firing frame. */
+        h_tick(p, i == 0 ? BUTTON_ATTACK : 0, 1);
+        fired = h_by_class("bfg blast", 0) != NULL && h_ammo(p) == ammo - 50;
+    }
+    CHECK(fired, "BFG projectile fired");
+    return fired;
+}
+
+static void h_view_timeout_kick(edict_t *p, const char *event, int delay)
+{
+    h_view_pause(p);
+    float *angles = p->client->ps.kick_angles;
+    float previous = fabsf(angles[PITCH]);
+    int onset = previous > 0 ? 0 : -1, rises = 0, late = 0;
+    for (int i = 1; i <= h_rate; i++) {
+        h_frame();
+        float pitch = fabsf(angles[PITCH]);
+        if (pitch > 0 && onset < 0) onset = i;
+        rises += pitch > previous;
+        late += i >= delay + 5 * h_div && !VectorCompare(angles, vec3_origin);
+        previous = pitch;
+    }
+    CHECK(onset == delay && rises == (delay != 0), "%s kick appears once at tick %d (onset %d, %d increases)",
+          event, delay, onset, rises);
+    CHECK(!late && tdm_match_status == MM_TIMEOUT, "%s kick recovers within 0.5 s of onset in timeout (%d late ticks)",
+          event, late);
+    h_view_resume(p);
+    CHECK(h_view_neutral(p), "%s kick stays neutral at resume", event);
+}
+
+static void sc_t24_view_timeout_damage(void)
+{
+    edict_t *p = h_view_player();
+    if (!p) return;
+    h_view_sync();
+    if (h_div > 1) h_frame();   /* Enter timeout before the next damage feedback sample. */
+    h_view_damage(p);
+    if (h_div == 1) h_frame();
+    h_view_timeout_kick(p, "damage", h_div > 1 ? h_div : 0);
+
+    if (!h_view_bfg(p)) return;
+    for (int i = 0; i < h_div && !p->client->ps.kick_angles[PITCH]; i++) h_frame();
+    h_view_timeout_kick(p, "BFG", 0);
+}
+
+/* Pitch and roll at the 100 ms presentation samples from the pre-fix box
+ * harness. Fall height was sampled every world tick, including at 60 Hz. */
+static const float h_view_fall_angles[5][2] = {
+    { 12.5f, 0 }, { 8.333334f, 0 }, { 4.166667f, 0 },
+};
+static const float h_view_fall_height60[] = {
+    17, 17.277779f, 17.555555f, 17.833334f, 18.111111f, 18.388889f,
+    18.666666f, 18.944445f, 19.222221f, 19.5f, 19.777779f, 20.055555f,
+    20.333334f, 20.611111f, 20.888889f, 21.166666f, 21.444445f, 21.722221f,
+};
+static const float h_view_damage_angles[2][5][2] = {
+    {
+        { -4.7140455f, -4.7140455f }, { -3.7712364f, -3.7712364f }, { -2.8284273f, -2.8284273f },
+        { -1.8856182f, -1.8856182f }, { -0.9428091f, -0.9428091f },
+    }, {
+        /* The second hit is at 80 health, after the timeout. */
+        { -5.3033018f, -5.3033018f }, { -4.2426414f, -4.2426414f }, { -3.1819813f, -3.1819813f },
+        { -2.1213207f, -2.1213207f }, { -1.0606604f, -1.0606604f },
+    },
+};
+static const float h_view_bfg_angles[2][5][2] = {
+    {
+        { -40, 6.6723518f }, { -32, 5.3378816f }, { -24, 4.0034113f },
+        { -16, 2.6689408f }, { -8, 1.3344704f },
+    }, {
+        { -36, 6.0051165f }, { -28, 4.6706462f }, { -20, 3.3361759f },
+        { -12, 2.0017056f }, { -4, 0.6672352f },
+    },
+};
+
+static void h_view_check_trace(edict_t *p, const char *event, const float angles[5][2], int delay)
+{
+    int wrong = 0;
+    for (int i = 0; i <= 6 * h_div; i++) {
+        player_state_t *ps = &p->client->ps;
+        int sample = i >= delay ? (i - delay) / h_div : -1;
+        const float *want = sample >= 0 && sample < 5 ? angles[sample] : vec3_origin;
+        float z = 22;
+        if (angles == h_view_fall_angles && i < 3 * h_div)
+            z = h_view_fall_height60[i * 6 / h_div];
+        if (fabsf(ps->kick_angles[PITCH] - want[0]) > 0.00001f || ps->kick_angles[YAW] ||
+            fabsf(ps->kick_angles[ROLL] - want[1]) > 0.00001f || fabsf(ps->viewoffset[2] - z) > 0.00001f) {
+            if (!wrong++)
+                printf("  info %s tick %d: pitch %.6f roll %.6f height %.6f (want %.6f %.6f %.6f)\n",
+                       event, i, ps->kick_angles[PITCH], ps->kick_angles[ROLL], ps->viewoffset[2], want[0], want[1], z);
+        }
+        h_frame();
+    }
+    CHECK(!wrong, "%s camera matches the pre-fix trace (%d mismatched ticks)", event, wrong);
+}
+
+static void sc_t24_view_no_timeout(void)
+{
+    /* The pre-fix trace below is recorded for these two rates only. */
+    if (h_rate != 10 && h_rate != 60) {
+        printf("  info pre-fix camera trace exists for 10 and 60 Hz only, rate %d not compared\n", h_rate);
+        return;
+    }
+    edict_t *p = h_view_player();
+    if (!p) return;
+    for (int after = 0; after < 2; after++) {
+        if (after) {
+            h_view_pause(p);
+            h_frames_n(h_rate);
+            h_view_resume(p);
+            h_frames_n(h_rate);
+            CHECK(level.realframenum > level.framenum, "match clock is behind the world clock after resume");
+        }
+        /* The box Pmove cannot fall: feed the landing velocity transition
+         * to the real server frame, on the floor and at a presentation tick. */
+        h_view_sync();
+        p->client->oldvelocity[2] = -500;
+        h_frame();
+        h_view_check_trace(p, "fall", h_view_fall_angles, 0);
+        h_view_sync();
+        h_view_damage(p);
+        h_frame();
+        h_view_check_trace(p, "damage", h_view_damage_angles[after], 0);
+        if (!h_view_bfg(p)) return;
+        h_view_check_trace(p, "BFG", h_view_bfg_angles[h_rate == 60], h_rate == 60 ? 3 : 0);
+        edict_t *blast = h_by_class("bfg blast", 0);
+        if (blast) G_FreeEdict(blast);
+    }
+}
+
+static void sc_t24_view_frozen(void)
+{
+    edict_t *p = h_view_player();
+    if (!p) return;
+    h_give(p, "quad damage", 0);
+    h_client_command(p, "use quad damage");
+    h_view_sync();
+    VectorSet(p->velocity, 180, 0, 0);
+    h_frame();
+    player_state_t *ps = &p->client->ps;
+    vec3_t kick, gun, offset;
+    VectorCopy(ps->kick_angles, kick);
+    VectorCopy(ps->gunangles, gun);
+    VectorCopy(ps->viewoffset, offset);
+    float bob = p->client->bobtime;
+    int frame = level.framenum, health = p->health;
+    unsigned quad = p->client->quad_framenum, air = p->air_finished_framenum;
+    CHECK(kick[PITCH] != 0 && gun[PITCH] != 0 && bob > 0 && quad > (unsigned)frame && air > (unsigned)frame,
+          "moving player has active speed tilt, bob, gun angle, quad and air");
+    p->waterlevel = 3;
+    p->watertype = CONTENTS_LAVA | CONTENTS_WATER;
+    h_view_pause(p);
+    int view_changed = 0, world_changed = 0;
+    for (int i = 0; i < h_rate; i++) {
+        h_frame();
+        view_changed += !VectorCompare(ps->kick_angles, kick) || !VectorCompare(ps->gunangles, gun) ||
+                        !VectorCompare(ps->viewoffset, offset) || p->client->bobtime != bob;
+        world_changed += level.framenum != frame || p->client->quad_framenum != quad ||
+                         p->air_finished_framenum != air || p->health != health;
+    }
+    CHECK(!view_changed, "speed tilt, bob and weapon angle stay frozen (%d changed ticks)", view_changed);
+    CHECK(!world_changed && tdm_match_status == MM_TIMEOUT, "powerup, air and environmental damage stay frozen (%d changed ticks)",
+          world_changed);
+    h_view_resume(p);
+    h_frames_n(h_div);
+    CHECK(p->health < health, "lava damages the player after resume");
+}
+#endif
+
+static void h_check_crush_log(int start, const char *expected)
+{
+    const char prefix[] = "Crush limiter: ";
+    int lines = 0, matches = 0;
+    for (int i = start; i < h_ndprints; i++) {
+        const char *text = h_dprints[i].text;
+        lines += !strncmp(text, prefix, sizeof(prefix) - 1);
+        matches += expected && !strcmp(text, expected);
+    }
+    CHECK(lines == (expected != NULL) && matches == lines, "crush log: %d lines, %d expected matches for %s",
+          lines, matches, expected ? expected : "no overflow");
+}
+
+static void sc_t24_crush_overflow_count(void)
+{
+    const char first_line[] = "Crush limiter: table full (64 pairs), limiting per victim\n";
+    h_scene_base();
+    h_start(h_ents);
+    edict_t *s1 = G_Spawn(), *s2 = G_Spawn(), *victim = G_Spawn();
+    h_crush_spawn_fill();
+    CHECK(h_crush_fill() == 64, "64 active pairs fit without overflow");
+    h_check_crush_log(0, NULL);
+
+    int start = h_ndprints, first, gap;
+    int hits = h_crush_run(s1, s2, victim, 3 * h_div, &first, &gap);
+    CHECK(first == 0 && hits == 3 && gap == h_div,
+          "fallback allows 3 hits at 100 ms intervals (hits %d)", hits);
+    h_check_crush_log(start, first_line);
+
+    start = h_ndprints;
+    ge->SpawnEntities("next", h_ents, "");
+    h_check_crush_log(start, "Crush limiter: overflow total on harness = 3\n");
+
+    start = h_ndprints;
+    s1 = G_Spawn();
+    victim = G_Spawn();
+    h_crush_spawn_fill();
+    CHECK(h_crush_fill() == 64 && G_CrushAllowed(s1, victim),
+          "first fallback hit is allowed on the new map");
+    h_check_crush_log(start, first_line);
+
+    start = h_ndprints;
+    ge->Shutdown();
+    h_check_crush_log(start, "Crush limiter: overflow total on next = 1\n");
+#ifdef HARNESS_OPENTDM
+    /* The engine reloads the module; the linked fixture keeps the old map pointer. */
+    level.entity_string = NULL;
+#endif
+    int restart = h_ndprints;
+    h_start(h_ents);
+    h_check_crush_log(restart, NULL);
+    ge->Shutdown();
+    h_check_crush_log(start, "Crush limiter: overflow total on next = 1\n");
+}
+
+enum { TOSS_FLOOR, TOSS_WALL, TOSS_CORNER, TOSS_STAIRS, TOSS_SCENES };
+enum { TOSS_STARTS = 6, TOSS_ARC_STEPS = 35, TOSS_MAX_HITS = 8 };
+
+typedef struct {
+    float x, z;
+} toss_point_t;
+
+typedef struct {
+    int tick, face;
+    toss_point_t point;
+} toss_hit_t;
+
+typedef struct {
+    int stop, count;
+    toss_point_t path[TOSS_ARC_STEPS];
+    toss_hit_t hits[TOSS_MAX_HITS];
+} toss_arc_t;
+
+typedef struct {
+    int count;
+    toss_point_t entry, stop;
+} toss_pad_ref_t;
+
+#include "toss-reference.h"
+
+static struct {
+    int start, count, exploded;
+    toss_hit_t hits[TOSS_MAX_HITS];
+    toss_point_t explosion;
+    float impact_y, explosion_y;
+    void (*touch)(edict_t *, edict_t *, cplane_t *, csurface_t *);
+    void (*think)(edict_t *);
+} toss_events;
+
+static toss_point_t h_toss_point(const edict_t *ent)
+{
+    return (toss_point_t){ ent->s.origin[0], ent->s.origin[2] };
+}
+
+static float h_toss_error(toss_point_t a, toss_point_t b)
+{
+    return hypotf(a.x - b.x, a.z - b.z);
+}
+
+static void h_toss_touch(edict_t *self, edict_t *other, cplane_t *plane, csurface_t *surf)
+{
+    int face = plane ? (int)plane->normal[0] + 2 * (int)plane->normal[2] : 0;
+    if (self != other && toss_events.count < TOSS_MAX_HITS)
+        toss_events.hits[toss_events.count] = (toss_hit_t){
+            h_frames + 1 - toss_events.start, face, h_toss_point(self)
+        };
+    if (self != other) toss_events.impact_y = self->s.origin[1];
+    toss_events.count += self != other;
+    if (toss_events.touch) toss_events.touch(self, other, plane, surf);
+}
+
+static void h_toss_explode(edict_t *ent)
+{
+    toss_events.exploded = h_frames + 1 - toss_events.start;
+    toss_events.explosion = h_toss_point(ent);
+    toss_events.explosion_y = ent->s.origin[1];
+    toss_events.think(ent);
+}
+
+static edict_t *h_toss_spawn(edict_t *player, int item, vec3_t start, const vec3_t velocity, int fuse)
+{
+    edict_t *obj;
+    if (item) {
+        obj = Drop_Item(player, FindItem("Shells"));
+    } else {
+        vec3_t dir = { 1, 0, 0 };
+#ifdef HARNESS_OPENTDM
+        fire_grenade(player, start, dir, 120, 0, fuse / 10.0f, 160);
+#else
+        fire_grenade(player, start, dir, 120, 0, fuse * h_div, 160);
+#endif
+        obj = h_by_class("grenade", 0);
+    }
+    if (!obj) imp_error("toss object did not spawn");
+    VectorCopy(start, obj->s.origin);
+    VectorCopy(start, obj->old_origin);
+    VectorCopy(velocity, obj->velocity);
+    gi.linkentity(obj);
+
+    memset(&toss_events, 0, sizeof(toss_events));
+    toss_events.start = h_frames;
+    toss_events.touch = obj->touch;
+    obj->touch = h_toss_touch;
+    if (!item) {
+        toss_events.think = obj->think;
+        obj->think = h_toss_explode;
+    }
+    return obj;
+}
+
+static void sc_t24_toss_free(void)
+{
+    h_scene_base();
+    h_start(h_ents);
+    edict_t *player = h_join(0, "p1");
+    for (int item = 0; item <= 1; item++) {
+        const char *name = item ? "item" : "grenade";
+        vec3_t start = { 0, 1000, 10000 }, velocity = { 400, 0, 300 };
+        edict_t *obj = h_toss_spawn(player, item, start, velocity, 30);
+        float error = 0;
+        for (int i = 0; i < h_rate; i++) {
+            h_frame();
+            int step = i / h_div;
+            float t = (float)(i % h_div + 1) / h_div;
+            toss_point_t a = toss_free_reference[step], b = toss_free_reference[step + 1];
+            toss_point_t expected = { a.x + t * (b.x - a.x), a.z + t * (b.z - a.z) };
+            toss_point_t actual = { obj->s.origin[0], obj->s.origin[2] - start[2] };
+            error = fmaxf(error, h_toss_error(actual, expected));
+            error = fmaxf(error, fabsf(obj->s.origin[1] - start[1]));
+        }
+        float dz = obj->s.origin[2] - start[2], vz = obj->velocity[2];
+        CHECK(obj->inuse && !toss_events.count && error <= 0.01f &&
+              fabsf(dz + 140) <= 0.01f && fabsf(vz + 500) <= 0.01f,
+              "%s free flight: dz %.5f, vz %.5f, worst path error %.5f", name, dz, vz, error);
+        G_FreeEdict(obj);
+    }
+}
+
+static edict_t *h_toss_bounce_scene(void)
+{
+    h_scene_base();
+    h_add_world(300, 1500, 0, 364, 1700, 1000);
+    h_add_world(200, 2100, 0, 264, 2300, 1000);
+    /* Eight risers down to the floor. */
+    h_add_world(-512, 2700, 0, 0, 2900, 128);
+    for (int step = 1; step <= 7; step++)
+        h_add_world(32 * (step - 1), 2700, 0, 32 * step, 2900, 128 - 16 * step);
+    h_start(h_ents);
+    return h_join(0, "p1");
+}
+
+static edict_t *h_toss_throw(edict_t *player, int scene, int start, int fuse)
+{
+    vec3_t origin = { 0, 1000 + 600 * scene, 64 }, velocity = { 600, 0, 200 };
+    if (scene == TOSS_CORNER) VectorSet(velocity, 500, 0, 0);
+    VectorMA(origin, start / 60.0f, velocity, origin);
+    if (scene == TOSS_STAIRS) {
+        VectorSet(origin, -16 + 2 * start, 2800, 300);
+        VectorSet(velocity, 30 * (start + 1), 0, 0);
+    }
+    return h_toss_spawn(player, 0, origin, velocity, fuse);
+}
+
+static int h_toss_at_rest(const edict_t *obj)
+{
+    return obj->groundentity && VectorCompare(obj->velocity, vec3_origin);
+}
+
+static float h_toss_tolerance(void)
+{
+    return h_rate == 10 ? 0.0001f : 0.1f;
+}
+
+static void h_toss_check_hits(const toss_arc_t *ref, int steps)
+{
+    int count = 0;
+    while (count < ref->count && ref->hits[count].tick <= steps) count++;
+    CHECK(toss_events.count == count, "impact count %d (10 Hz: %d)", toss_events.count, count);
+    for (int i = 0; i < count && i < toss_events.count; i++) {
+        const toss_hit_t *got = &toss_events.hits[i], *want = &ref->hits[i];
+        float error = h_toss_error(got->point, want->point);
+        int boundary = want->tick * h_div;
+        CHECK(got->face == want->face && error <= h_toss_tolerance() &&
+              boundary - h_div < got->tick && got->tick <= boundary,
+              "hit %d: face %d/%d, position error %.5f, tick %d (10 Hz: %d)",
+              i + 1, got->face, want->face, error, got->tick, boundary);
+    }
+}
+
+static void h_toss_bounce_case(edict_t *player, int scene, int start, int steps)
+{
+    int msgs = h_nmsgs, stop = 0;
+    float path_error = 0;
+    edict_t *obj = h_toss_throw(player, scene, start, steps);
+    float y = obj->s.origin[1];
+    int last = steps * h_div;
+    int limit = last + 1;
+    const toss_arc_t *ref = &toss_reference[scene][start];
+    for (int tick = 1; tick <= limit; tick++) {
+        h_frame();
+        if (!obj->inuse) break;
+        if (!stop && h_toss_at_rest(obj)) stop = tick;
+        if (tick % h_div || tick > last) continue;
+        int node = tick / h_div;
+        if (ref->stop && node > ref->stop) node = ref->stop;
+        path_error = fmaxf(path_error, h_toss_error(h_toss_point(obj), ref->path[node - 1]));
+        path_error = fmaxf(path_error, fabsf(obj->s.origin[1] - y));
+    }
+    CHECK(!obj->inuse && toss_events.exploded == limit && h_explosions(msgs) == 1,
+          "scene %d start %d fuse %.1fs: one explosion at tick %d (expected %d)",
+          scene, start, steps / 10.0f, toss_events.exploded, limit);
+    int stop_boundary = ref->stop * h_div;
+    int node = ref->stop && steps > ref->stop ? ref->stop : steps;
+    float explosion_error = h_toss_error(toss_events.explosion, ref->path[node - 1]);
+    CHECK(path_error <= h_toss_tolerance() && explosion_error <= h_toss_tolerance(),
+          "scene %d start %d: worst 100 ms position error %.5f; explosion error %.5f",
+          scene, start, path_error, explosion_error);
+    CHECK(ref->stop && ref->stop <= steps ? stop_boundary - h_div < stop && stop <= stop_boundary : !stop,
+          "stop tick %d (10 Hz: %d, fuse boundary: %d)", stop, stop_boundary, last);
+    h_toss_check_hits(ref, steps);
+    if (obj->inuse) G_FreeEdict(obj);
+}
+
+static void sc_t24_toss_bounce(void)
+{
+    edict_t *player = h_toss_bounce_scene();
+    for (int scene = 0; scene < TOSS_SCENES; scene++)
+        for (int start = 0; start < TOSS_STARTS; start++) {
+            h_toss_bounce_case(player, scene, start, 10);
+            h_toss_bounce_case(player, scene, start, 15);
+            h_toss_bounce_case(player, scene, start, 25);
+            if (scene == TOSS_STAIRS && toss_reference[scene][start].stop > 25)
+                h_toss_bounce_case(player, scene, start, 28);
+        }
+}
+
+#ifndef HARNESS_ENGINE
+static void sc_t24_toss_hold(void)
+{
+    edict_t *player = h_toss_bounce_scene();
+    const toss_arc_t *ref = &toss_reference[TOSS_WALL][0];
+    edict_t *obj = h_toss_throw(player, TOSS_WALL, 0, 60);
+    int hit = 0, hold_end = 0, stop = 0, waiting = 0, moved = 0, still = 0;
+    float path_error = 0;
+    vec3_t impact = { 0 };
+    for (int tick = 1; tick <= TOSS_ARC_STEPS * h_div; tick++) {
+        h_frame();
+        if (tick <= hold_end && toss_events.count != hit)
+            moved++;
+        if (tick == hold_end + 1 && hold_end)
+            still += VectorCompare(obj->s.origin, impact);
+        if (toss_events.count > hit && toss_events.count <= TOSS_MAX_HITS) {
+            hit = toss_events.count;
+            if (!h_toss_at_rest(obj)) {
+                toss_point_t point = toss_events.hits[hit - 1].point;
+                VectorSet(impact, point.x, toss_events.impact_y, point.z);
+                hold_end = ((tick + h_div - 1) / h_div) * h_div;
+            }
+        }
+        if (tick <= hold_end) {
+            waiting += tick > toss_events.hits[hit - 1].tick;
+            moved += !VectorCompare(obj->s.origin, impact);
+        }
+        if (!stop && h_toss_at_rest(obj)) stop = tick;
+        if (tick % h_div == 0) {
+            int node = tick / h_div;
+            if (ref->stop && node > ref->stop) node = ref->stop;
+            path_error = fmaxf(path_error, h_toss_error(h_toss_point(obj), ref->path[node - 1]));
+        }
+    }
+    CHECK((h_div == 1 || waiting > 0) && !moved && !still,
+          "wait at impact until the step ends: %d waiting ticks, %d moved, %d late resumes", waiting, moved, still);
+    CHECK(ref->count >= 4 && path_error <= h_toss_tolerance(),
+          "four or more impacts with aligned 100 ms positions (path error %.5f)", path_error);
+    CHECK(stop > (ref->stop - 1) * h_div && stop <= ref->stop * h_div,
+          "stop tick %d (10 Hz: %d)", stop, ref->stop * h_div);
+    h_toss_check_hits(ref, TOSS_ARC_STEPS);
+    G_FreeEdict(obj);
+
+    vec3_t start = { 294, 1600, 200 }, velocity = { 600, 0, 0 };
+    obj = h_toss_spawn(player, 0, start, velocity, 30);
+    h_frames_n(h_div);
+    CHECK(toss_events.count == 1 && toss_events.hits[0].tick == 1 && !obj->groundentity,
+          "spin setup: one wall impact in the first frame, hit tick %d count %d",
+          toss_events.hits[0].tick, toss_events.count);
+    CHECK(fabsf(obj->s.angles[0] - 30) <= H_EPS &&
+          fabsf(obj->s.angles[1] - 30) <= H_EPS && fabsf(obj->s.angles[2] - 30) <= H_EPS,
+          "spin through wall hold: angles %.5f %.5f %.5f (10 Hz: 30 30 30)",
+          obj->s.angles[0], obj->s.angles[1], obj->s.angles[2]);
+    G_FreeEdict(obj);
+
+    int msgs = h_nmsgs;
+    obj = h_toss_spawn(player, 0, start, velocity, 1);
+    /* At 60 Hz the fuse expires before the held step closes. */
+    int delay = h_div > 2 ? 2 : h_div;
+    const toss_point_t wall_contact = { 299.969025f, 199.204132f };
+    obj->nextthink -= h_div - delay;
+    h_frames_n(delay + 1);
+    CHECK(!obj->inuse && toss_events.exploded == delay + 1 && h_explosions(msgs) == 1 &&
+          toss_events.count == 1 && toss_events.hits[0].tick == 1 &&
+          h_toss_error(toss_events.explosion, wall_contact) <= h_toss_tolerance() &&
+          fabsf(toss_events.explosion_y - start[1]) <= h_toss_tolerance(),
+          "fuse during wall hold: hit tick %d, exploded at tick %d (expected %d), position %.7f %.7f %.7f",
+          toss_events.hits[0].tick, toss_events.exploded, delay + 1,
+          toss_events.explosion.x, toss_events.explosion_y, toss_events.explosion.z);
+}
+
+static void sc_t24_toss_head(void)
+{
+    edict_t *player = h_toss_bounce_scene();
+    for (int wall = 0; wall <= 1; wall++) {
+        edict_t *body = EDICT(game.maxclients + level.body_que + 1);
+        player->movetype = MOVETYPE_TOSS;
+        respawn(player);
+        if (!body->die) imp_error("respawn did not leave a body");
+        VectorSet(body->s.origin, wall ? 246 : 0, 1600, 200);
+        VectorSet(body->mins, -48, -16, -24);
+        VectorSet(body->maxs, 48, 16, 16);
+        VectorSet(body->velocity, 600, 0, 0);
+        body->groundentity = NULL;
+        gi.linkentity(body);
+        h_frame();
+        CHECK(body->inuse && !body->groundentity &&
+              (wall ? body->velocity[0] <= 0 : body->velocity[0] == 600),
+              "body setup %s: still airborne, vx %.5f", wall ? "at wall" : "in flight", body->velocity[0]);
+
+        body->health = -41;
+        body->die(body, player, player, 100, body->s.origin);
+        float z = body->s.origin[2], vz = body->velocity[2];
+        CHECK(body->s.effects == EF_GIB && body->movetype == MOVETYPE_BOUNCE,
+              "body setup %s: converted to a head", wall ? "at wall" : "in flight");
+        h_frame();
+        CHECK(fabsf(body->velocity[2] - (vz - 80)) <= H_EPS &&
+              fabsf((body->s.origin[2] - z) - (vz - 80) * FRAMETIME) <= H_EPS,
+              "head from body %s: first-frame gravity %.5f, dz %.5f (expected %.5f)",
+              wall ? "at wall" : "in flight", vz - body->velocity[2], body->s.origin[2] - z, (vz - 80) * FRAMETIME);
+    }
+}
+
+static void sc_t24_toss_land(void)
+{
+    h_scene_base();
+    for (int phase = 0; phase < h_div; phase++) {
+        int model = h_add_inline(300 * phase - 32, 1968, 128, 300 * phase + 32, 2032, 192);
+        h_ent("{\n\"classname\" \"func_wall\"\n\"model\" \"*%d\"\n}\n", model);
+    }
+    h_start(h_ents);
+    edict_t *player = h_join(0, "p1");
+    int phases = 0;
+    for (int i = 0; i < h_div; i++) {
+        /* Shift the launch by one world tick each time. Remove the support as soon as it catches the grenade. */
+        while (h_frames % h_div != i) h_frame();
+        edict_t *wall = h_by_model(va("*%d", i + 1));
+        if (!wall) imp_error("toss support did not spawn");
+        vec3_t start = { 300 * i, 2000, 196 }, zero = { 0 };
+        edict_t *obj = h_toss_spawn(player, 0, start, zero, 30);
+        for (int tick = 0; tick < h_rate && !obj->groundentity; tick++) h_frame();
+        CHECK(obj->groundentity == wall, "launch phase %d: landed on the support", i);
+        phases |= 1 << (h_frames % h_div);
+        float z = obj->s.origin[2];
+        G_FreeEdict(wall);
+        h_frame();
+        CHECK(!obj->groundentity && obj->s.origin[2] < z, "launch phase %d: fell in the tick after support removal (dz %.6f)",
+              i, obj->s.origin[2] - z);
+        G_FreeEdict(obj);
+    }
+    CHECK(phases == (1 << h_div) - 1, "support removal covered all %d world-tick phases", h_div);
+}
+
+#endif
+
+#ifdef HARNESS_ENGINE
+static void sc_t24_toss_edge(void)
+{
+    h_scene_base();
+    h_add_world(-64, 1936, 128, 64, 2064, 192);
+    h_start(h_ents);
+    edict_t *player = h_join(0, "p1");
+    vec3_t start = { 0, 2000, 199.99996948242188f }, zero = { 0 };
+    edict_t *obj = h_toss_spawn(player, 0, start, zero, 30);
+    h_frames_n(h_div);
+    CHECK(toss_events.count == 1 && toss_events.hits[0].face == 2 && obj->groundentity == EDICT(0) &&
+          fabsf(obj->s.origin[2] - 192.03125f) <= H_EPS,
+          "fractional edge: contact in first 100 ms, got %d hits at z %.9g (hit tick %d, ground %d)",
+          toss_events.count, obj->s.origin[2], toss_events.hits[0].tick, obj->groundentity == EDICT(0));
+}
+
+static void sc_t24_toss_drop(void)
+{
+    h_scene_base();
+    int model = h_add_inline(-64, 1936, 256, 64, 2064, 320);
+    h_ent("{\n\"classname\" \"func_plat\"\n\"model\" \"*%d\"\n\"height\" \"256\"\n}\n", model);
+    h_add_world(200, 1936, 0, 328, 2064, 64);
+    h_start(h_ents);
+    edict_t *plat = h_by_model("*1"), *player = h_join(0, "p1");
+    if (!plat) imp_error("toss platform did not spawn");
+    static const int heights[] = { 4, 8, 16, 24, 28, 36, 48 };
+    for (int item = 0; item <= 1; item++)
+        for (int platform = 0; platform <= 1; platform++)
+            for (int i = 0; i < (int)(sizeof(heights) / sizeof(heights[0])); i++) {
+                vec3_t start = { platform ? 8 : 264, 2000, 64 + heights[i] }, zero = { 0 };
+                edict_t *obj = h_toss_spawn(player, item, start, zero, 30);
+                obj->s.origin[2] -= obj->mins[2];
+                gi.linkentity(obj);
+                h_frames_n(3 * h_rate / 2);
+                int landed = obj->groundentity == (platform ? plat : EDICT(0)) &&
+                             fabsf(obj->s.origin[2] + obj->mins[2] - 64) <= 0.1f;
+                /* A classic step that ends exactly on a face can already miss it at 10 Hz. */
+                if (h_rate == 10 || toss_drop_reference[i])
+                    CHECK(landed == toss_drop_reference[i],
+                          "%s +%d on %s: landed %d (10 Hz: %d)", item ? "item" : "grenade",
+                          heights[i], platform ? "platform" : "brush", landed, toss_drop_reference[i]);
+                G_FreeEdict(obj);
+            }
+}
+#else
+
+static struct {
+    int count;
+    toss_point_t first;
+    void (*touch)(edict_t *, edict_t *, cplane_t *, csurface_t *);
+} toss_pad;
+
+static void h_toss_pad_touch(edict_t *self, edict_t *other, cplane_t *plane, csurface_t *surf)
+{
+    if (other->movetype == MOVETYPE_BOUNCE || (other->spawnflags & DROPPED_ITEM)) {
+        if (!toss_pad.count) toss_pad.first = h_toss_point(other);
+        toss_pad.count++;
+    }
+    toss_pad.touch(self, other, plane, surf);
+}
+
+static void sc_t24_toss_pad(void)
+{
+    h_scene_base();
+    static const int boxes[][3] = { { 270, 330, 56 }, { 335, 355, 45 }, { 420, 520, 32 } };
+    for (int i = 0; i < (int)(sizeof(boxes) / sizeof(boxes[0])); i++) {
+        int y = 1000 + 500 * i;
+        int model = h_add_inline(boxes[i][0], y - 100, 0, boxes[i][1], y + 100, boxes[i][2]);
+        h_ent("{\n\"classname\" \"trigger_push\"\n\"model\" \"*%d\"\n\"angles\" \"-45 0 0\"\n\"speed\" \"50\"\n}\n", model);
+    }
+    h_start(h_ents);
+    edict_t *player = h_join(0, "p1");
+    for (int i = 0; i < 4; i++) {
+        int item = i == 3, lane = item ? 0 : i;
+        edict_t *trigger = h_by_model(va("*%d", lane + 1));
+        if (!trigger || !trigger->touch) imp_error("trigger_push did not spawn");
+        toss_pad.count = 0;
+        toss_pad.touch = trigger->touch;
+        trigger->touch = h_toss_pad_touch;
+
+        vec3_t start = { 0, 1000 + 500 * lane, lane == 1 ? 200 : 64 };
+        vec3_t velocity = { 600, 0, lane == 1 ? 0 : 200 };
+        edict_t *obj = h_toss_spawn(player, item, start, velocity, 50);
+        if (item) obj->s.origin[2] -= obj->mins[2];
+        gi.linkentity(obj);
+        for (int tick = 0; tick < 4 * h_rate && !h_toss_at_rest(obj); tick++) h_frame();
+        CHECK(h_toss_at_rest(obj), "pad case %d: object came to rest", i);
+        const toss_pad_ref_t *ref = &toss_pad_reference[i];
+        float entry_error = toss_pad.count ? h_toss_error(toss_pad.first, ref->entry) : 0;
+        float stop_error = h_toss_error(h_toss_point(obj), ref->stop);
+        CHECK(toss_pad.count == ref->count && entry_error <= h_toss_tolerance() &&
+              (item || stop_error <= h_toss_tolerance()),
+              "pad case %d: %d touches (10 Hz: %d), entry error %.5f, stop error %.5f",
+              i, toss_pad.count, ref->count, entry_error, stop_error);
+        trigger->touch = toss_pad.touch;
+        G_FreeEdict(obj);
+    }
+}
+
+static void sc_t24_toss_projectile(void)
+{
+    h_scene_base();
+    h_start(h_ents);
+    edict_t *player = h_join(0, "p1");
+    for (int rocket = 0; rocket <= 1; rocket++) {
+        vec3_t start, dir = { 1, 0, 0 };
+        VectorCopy(player->s.origin, start);
+        start[2] += 20;
+        if (rocket) fire_rocket(player, start, dir, 100, 650, 120, 120);
+        else fire_blaster(player, start, dir, 15, 1000, EF_BLASTER, false);
+        edict_t *obj = h_by_class(rocket ? "rocket" : "bolt", 0);
+        if (!obj) imp_error("projectile did not spawn");
+        float error = 0;
+        for (int i = 1; i <= h_rate; i++) {
+            h_frame();
+            vec3_t point, velocity = { toss_projectile_speed[rocket], 0, 0 };
+            VectorMA(start, (float)i / h_rate, velocity, point);
+            vec3_t delta;
+            VectorSubtract(point, obj->s.origin, delta);
+            error = fmaxf(error, VectorLength(delta));
+            VectorSubtract(velocity, obj->velocity, delta);
+            error = fmaxf(error, VectorLength(delta));
+        }
+        CHECK(obj->inuse && error <= 0.01f, "%s: worst position or velocity error %.5f",
+              rocket ? "rocket" : "blaster", error);
+        G_FreeEdict(obj);
+    }
+}
+
+#ifdef HARNESS_OPENTDM
+static void h_toss_timeout_run(edict_t *player, int pause, toss_arc_t *arc)
+{
+    vec3_t start = { 0, 1000, 64 }, velocity = { 600, 0, 200 };
+    edict_t *obj = h_toss_spawn(player, 0, start, velocity, 60);
+    for (int tick = 1; tick <= TOSS_ARC_STEPS * h_div; tick++) {
+        if (pause && tick == h_div + 2) {
+            int match_frame = level.framenum;
+            vec3_t origin, speed;
+            VectorCopy(obj->s.origin, origin);
+            VectorCopy(obj->velocity, speed);
+            h_client_command(player, "time");
+            CHECK(tdm_match_status == MM_TIMEOUT, "entered timeout mid-flight");
+            int budget = 15 * h_rate, frozen = 1;
+            for (int i = 0; i < budget && tdm_match_status == MM_TIMEOUT; i++) {
+                if (i == h_rate) h_client_command(player, "time");
+                h_frame();
+                if (tdm_match_status == MM_TIMEOUT)
+                    frozen &= obj->inuse && VectorCompare(obj->s.origin, origin) &&
+                              VectorCompare(obj->velocity, speed) && level.framenum == match_frame;
+            }
+            CHECK(frozen && tdm_match_status == MM_PLAYING, "trajectory and match clock stayed frozen until resume");
+            int paused = h_frames - toss_events.start - (tick - 1);
+            toss_events.start += paused;
+            /* The resume status is updated after the entity loop. */
+            h_frame();
+        } else {
+            h_frame();
+        }
+        if (tick % h_div == 0) arc->path[tick / h_div - 1] = h_toss_point(obj);
+        if (!arc->stop && h_toss_at_rest(obj)) arc->stop = tick;
+    }
+    arc->count = toss_events.count;
+    memcpy(arc->hits, toss_events.hits, sizeof(arc->hits));
+    G_FreeEdict(obj);
+}
+
+static void sc_t24_toss_timeout(void)
+{
+    edict_t *a, *b;
+    h_tdm_pair(&a, &b);
+    if (!h_tdm_start(a, b)) return;
+    toss_arc_t continuous = { 0 }, paused = { 0 };
+    h_toss_timeout_run(a, 0, &continuous);
+    h_toss_timeout_run(a, 1, &paused);
+    float error = 0;
+    for (int i = 0; i < TOSS_ARC_STEPS; i++)
+        error = fmaxf(error, h_toss_error(continuous.path[i], paused.path[i]));
+    int same = continuous.count > 0 && continuous.count == paused.count && continuous.count <= TOSS_MAX_HITS;
+    for (int i = 0; same && i < continuous.count; i++) {
+        const toss_hit_t *before = &continuous.hits[i], *after = &paused.hits[i];
+        same = before->tick == after->tick && before->face == after->face &&
+               h_toss_error(before->point, after->point) <= H_EPS;
+    }
+    CHECK(same && continuous.stop && continuous.stop == paused.stop && error <= H_EPS,
+          "resume follows the same arc, impacts and stop as uninterrupted play (path error %.5f)", error);
+}
+#endif
+#endif
+
 static const struct { const char *name; void (*run)(void); } h_scenarios[] = {
     { "smoke", sc_smoke },
     { "t01_rate_refuse", sc_t01_rate_refuse },
@@ -2886,6 +3888,29 @@ static const struct { const char *name; void (*run)(void); } h_scenarios[] = {
     { "t09_timeout_release_mg", sc_t09_timeout_release_mg },
     { "t10_timeout_release_grenade", sc_t10_timeout_release_grenade },
     { "t10_timeout_hold_grenade", sc_t10_timeout_hold_grenade },
+#endif
+    { "t24_plat_object", sc_t24_plat_object },
+    { "t24_crush_overflow_count", sc_t24_crush_overflow_count },
+#ifdef HARNESS_OPENTDM
+    { "t24_view_timeout_fall", sc_t24_view_timeout_fall },
+    { "t24_view_timeout_damage", sc_t24_view_timeout_damage },
+    { "t24_view_no_timeout", sc_t24_view_no_timeout },
+    { "t24_view_frozen", sc_t24_view_frozen },
+#endif
+    { "t24_toss_free", sc_t24_toss_free },
+    { "t24_toss_bounce", sc_t24_toss_bounce },
+#ifdef HARNESS_ENGINE
+    { "t24_toss_edge", sc_t24_toss_edge },
+    { "t24_toss_drop", sc_t24_toss_drop },
+#else
+    { "t24_toss_head", sc_t24_toss_head },
+    { "t24_toss_hold", sc_t24_toss_hold },
+    { "t24_toss_land", sc_t24_toss_land },
+    { "t24_toss_pad", sc_t24_toss_pad },
+    { "t24_toss_projectile", sc_t24_toss_projectile },
+#ifdef HARNESS_OPENTDM
+    { "t24_toss_timeout", sc_t24_toss_timeout },
+#endif
 #endif
     { NULL, NULL }
 };

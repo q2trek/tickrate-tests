@@ -133,3 +133,14 @@ neg-remote-steady | q2pro/src/client/remote_lerp.c | remote | 60 | * | s/\&\& !c
 neg-remote-clock | q2pro/src/client/remote_lerp.c | remote | 60 | * | s/RL_At(r, r->P, S + I, o);/RL_At(r, t, S + I, o);/
 neg-remote-pause | q2pro/src/client/remote_lerp.c | remote | 60 | * | s/} else if (!paused) {/} else if (1) {/ | s/    unsigned dt_real =/    (void)paused; unsigned dt_real =/
 neg-remote-cap | q2pro/src/client/remote_lerp.c | remote | 60 | * | s/r->P = fminf(r->P, rec(r, 0)->s.t);/(void)0;/
+
+# moving platform support, classic toss trajectories, and crush overflow logs
+neg-openffa-plat-object | openffa/g_main.c | api3:engine | 60 | t24_plat_object | /if ((ent->groundentity)/,/ClientBeginServerFrame(ent);/s/} else if (FRAMESYNC) {/} else {/
+neg-openffa-toss-gravity | openffa/g_phys.c | api3:box | 60 | t24_toss_free | /if (toss && remaining == step_frames)/,+1{s/ && remaining == step_frames//;s/ \* TOSS_STEP_TIME;/ * FRAMETIME;/;}
+neg-openffa-crush-count | openffa/g_utils.c | api3:box | 60 | t24_crush_overflow_count | s/++level.crush_overflows/level.crush_overflows/
+neg-opentdm-plat-object | opentdm/g_main.c | api3:engine | 60 | t24_plat_object | /if ((ent->groundentity)/,/ClientBeginServerFrame(ent);/s/} else if (FRAMESYNC) {/} else {/
+neg-opentdm-toss-gravity | opentdm/g_phys.c | api3:box | 60 | t24_toss_free | /if (toss && remaining == step_frames)/,+1{s/ && remaining == step_frames//;s/ \* TOSS_STEP_TIME;/ * FRAMETIME;/;}
+neg-opentdm-crush-count | opentdm/g_utils.c | api3:box | 60 | t24_crush_overflow_count | s/++level.crush_overflows/level.crush_overflows/
+
+# real-clock fall kick during an OpenTDM timeout
+neg-opentdm-view-timeout | opentdm/p_view.c | api3:engine | 60 | t24_view_timeout_fall | /\/ (float) FALL_FRAMES;$/s/fall_framenum - level.realframenum/fall_framenum - level.framenum/

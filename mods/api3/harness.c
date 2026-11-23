@@ -166,6 +166,8 @@ static int h_verbose;
 typedef struct { int frame, num; char text[128]; } hprint_t;
 static hprint_t h_bprints[4096], h_cstrings[8192];
 static int h_nbprints, h_ncstrings;
+static hprint_t h_dprints[4096];
+static int h_ndprints;
 
 static void h_log_text(hprint_t *log, int *n, int cap, int num, const char *text)
 {
@@ -186,8 +188,10 @@ static void imp_bprintf(int level, const char *fmt, ...)
 }
 static void imp_dprintf(const char *fmt, ...)
 {
-    if (!h_verbose) return;
-    va_list ap; va_start(ap, fmt); printf("    [dprint] "); vprintf(fmt, ap); va_end(ap);
+    char text[1024];
+    va_list ap; va_start(ap, fmt); vsnprintf(text, sizeof(text), fmt, ap); va_end(ap);
+    h_log_text(h_dprints, &h_ndprints, sizeof(h_dprints) / sizeof(h_dprints[0]), 0, text);
+    if (h_verbose) printf("    [dprint] %s", text);
 }
 /* client prints and stufftext/layout unicasts (the text a client gets),
  * with the frame and the receiving entity (-1: everyone) */
@@ -919,6 +923,13 @@ static int h_listed(const char *name)
     int mover = !strncmp(name, "t13_", 4) || !strncmp(name, "t14_", 4);
     int crush = !strncmp(name, "t12_", 4) && strcmp(name, "t12_rotating_touch");
     if (h_sched != H_SCHED_TICK) return H_ENGINE && mover;     /* the path ticks follow the schedule */
+    if (!strncmp(name, "t24_", 4)) {
+        if (!strcmp(name, "t24_plat_object") || !strcmp(name, "t24_toss_free") ||
+            !strcmp(name, "t24_toss_bounce")) return 1;
+        int engine_only = !strcmp(name, "t24_toss_drop") || !strcmp(name, "t24_toss_edge") ||
+                          !strcmp(name, "t24_view_timeout_fall");
+        return H_ENGINE == engine_only;
+    }
     return H_ENGINE ? mover || crush : !mover && strcmp(name, "t12_rotating_ride");
 }
 

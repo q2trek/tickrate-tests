@@ -3,7 +3,7 @@
 #
 #   ./run.sh [--negative] [--only REGEX] Q2PRO OPENFFA OPENTDM
 #
-# Q2PRO, OPENFFA, OPENTDM: checkouts of the forks (branch master). Their
+# Q2PRO, OPENFFA, OPENTDM: checkouts of the forks. Their
 # UPSTREAM_REF (default origin/master, origin being the upstream remote) is the
 # upstream the peers and controls come from. Environment:
 #   Q2_DATA  Quake 2 directory with baseq2/pak*.pak (engine stages need a map)
@@ -64,7 +64,7 @@ need() {
         case $v in
             Q2_DATA) compgen -G "${Q2_DATA:-/nonexistent}/baseq2/pak*.pak" >/dev/null ||
                 { echo "missing input: Q2_DATA (no baseq2/pak*.pak in '${Q2_DATA:-}')"; return 77; } ;;
-            *) [[ -d ${!v}/.git ]] || { echo "missing input: $v (no checkout at ${!v})"; return 77; } ;;
+            *) [[ -e ${!v}/.git ]] || { echo "missing input: $v (no checkout at ${!v})"; return 77; } ;;
         esac
     done
 }
@@ -154,13 +154,20 @@ capability() {
         -fdata-sections "$HERE/engine/client/capability.c" -Wl,--gc-sections -o "$OUT/capability" && "$OUT/capability"
 }
 
-api3() {               # api3 MOD SRC_VAR DIR RATE [box|engine|sched] [--replace ..]
-    local mod=$1 var=$2 dir=$3 rate=$4 how=$5 s rc=0 engine=()
+api3() {               # api3 MOD SRC_VAR DIR RATES box|engine|sched|toss-rates [--replace ..]
+    local mod=$1 var=$2 dir=$3 rate=$4 how=$5 r s rc=0 engine=()
     shift 5
     need "$var" || return
-    [[ $how != box ]] && engine=(--engine)
+    [[ $how == engine || $how == sched ]] && engine=(--engine)
     python3 "$HERE/mods/api3/build.py" --engine-build "$OUT/bded-fps" --out "$dir" --mod "$mod" \
         --mod-src "${!var}" "${engine[@]}" "$@" || return 1
+    if [[ $how == toss-rates ]]; then
+        for r in $rate; do
+            ((r > 10 && r < 60)) || continue
+            HARNESS_RATE=$r timeout -k 5 120 "$dir/harness" t24_toss_free || rc=1
+        done
+        return $rc
+    fi
     [[ $how != sched ]] && { scenarios "$dir/harness" HARNESS_RATE="$rate"; return; }
     for s in 30 10 batch; do scenarios "$dir/harness" HARNESS_RATE="$rate" HARNESS_SCHED=$s || rc=1; done
     return $rc
@@ -253,7 +260,7 @@ remote_lerp() {
 # control NAME FILE HARNESS RATE SCENARIOS SED...: see controls.txt. PASS
 # when a scenario fails an assertion (a crash or a timeout is not a catch)
 control() {
-    local name=$1 file=$2 how=$3 rate=$4 list=$5 var dir=$OUT/neg/$1 rel copy s out bin caught=0 e=() run=() args=()
+    local name=$1 file=$2 how=$3 rate=$4 list=$5 rc var dir=$OUT/neg/$1 rel copy s out bin e=() run=() args=()
     shift 5
     var=${file%%/*} rel=${file#*/}
     var=${var^^}
@@ -297,11 +304,19 @@ control() {
     esac
     [[ $list == '*' ]] && list=$(env "${run[@]}" "$bin" list)
     for s in $list; do
-        out=$(env "${run[@]}" timeout -k 5 120 "$bin" "$s" 2>&1)
-        # an assertion (CHECK prints file:line), not an abort or a precondition
-        command grep -E '^  FAIL .+\.[ch]:[0-9]+: ' <<<"$out" && { caught=1; echo "negative control $name: caught by $s at $rate Hz"; break; }
+        out=$(env "${run[@]}" timeout -k 5 120 "$bin" "$s" 2>&1) && continue
+        rc=$?
+        if ((rc != 1)) || command grep -q '^  FAIL game error:' <<<"$out" ||
+            ! command grep -E '^  FAIL .+\.[ch]:[0-9]+: ' <<<"$out"; then
+            echo "$out"
+            echo "FAIL negative control $name: $s returned $rc without a valid assertion failure"
+            return 1
+        fi
+        echo "negative control $name: caught by $s at $rate Hz"
+        return 0
     done
-    ((caught)) || { echo "FAIL negative control $name: $list still pass at $rate Hz"; return 1; }
+    echo "FAIL negative control $name: $list still pass at $rate Hz"
+    return 1
 }
 
 # on a fixed 10 Hz engine a requested rate cannot engage: both the API3 and
@@ -363,6 +378,12 @@ for r in $RATES; do
         done
     done
 done
+# Compare free flight to the 10 Hz reference at the intermediate rates.
+if [[ " $RATES " =~ [[:space:]](20|30|40|50)[[:space:]] ]]; then
+    for m in openffa:OPENFFA opentdm:OPENTDM; do
+        stage api3-${m%:*}-toss-rates@20-50 api3 "${m%:*}" "${m#*:}" "$OUT/api3-${m%:*}-box" "$RATES" toss-rates
+    done
+fi
 # real time over UDP: rates written to a fork client, an upstream client, a
 # client without variable FPS and one on protocol 34 by one fork server
 # (README, expected rates)
