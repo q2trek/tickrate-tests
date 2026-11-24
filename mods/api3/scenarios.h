@@ -6897,6 +6897,7 @@ static void sc_t23_movers_wait(void)
 #include "match_timeout_toss.h"
 #include "timeout_grenade.h"
 #include "item_grid_edges.h"
+#include "grid_regressions.h"
 
 static void sc_unlag_default(void)
 {
@@ -7096,6 +7097,11 @@ static const struct { const char *name; void (*run)(void); } h_scenarios[] = {
 #endif
     { "t24_plat_late_support", sc_t24_plat_late_support },
     { "t24_plat_fuse", sc_t24_plat_fuse },
+    { "t24_grenade_windows", sc_t24_grenade_windows },
+    { "t24_short_actions", sc_t24_short_actions },
+#ifdef HARNESS_OPENTDM
+    { "t24_timeout_blocked_rider", sc_t24_timeout_blocked_rider },
+#endif
     { "t24_plat_zero_push", sc_t24_plat_zero_push },
 #ifdef HARNESS_OPENTDM
     { "t24_door_final_push", sc_t24_door_final_push },

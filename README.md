@@ -139,6 +139,10 @@ check named assertion failures where an assertion is specified.
 
 Grenades stay supported without another impact when a slow platform or OpenTDM's final door push rounds to zero above 10 Hz.
 
+Hand grenade scenarios compare every remaining fuse window and launch speed at each rate.
+OpenTDM rolls back a blocked platform with a rider before timeout freeze without crush damage or reversal.
+Short delayed map actions and item respawns stay on the grid in both edict orders.
+
 At 10 Hz the scenarios include the hurt-zone sound and the expiring
 dropped quad in both mods, plus OpenTDM's second short tap and linear mover
 resumption after a timeout. The suite does not include the separate comparison
