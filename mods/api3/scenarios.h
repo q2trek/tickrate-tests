@@ -3039,12 +3039,13 @@ static void sc_t24_door_final_push(void)
     edict_t *player = h_join(0, "p1"), *door = h_by_model("*1");
     edict_t *grenade = h_plat_object(player, door, H_PLAT_GRENADE);
     h_frames_n(h_rate);
-    h_frames_n(h_grid_wait());
+    h_frames_n((h_grid_wait() + 1) % h_div);
     door->use(door, player, player);
-    /* The deferred start takes two frames, followed by 40 travel frames. */
+    /* Run the last travel frame on the grid so the grenade has seen the real move. */
     h_frames_n(42);
-    CHECK(!h_grid_wait() && door->s.origin[0] == 120 && door->velocity[0] != 0 &&
+    CHECK(door->s.origin[0] == 120 && door->velocity[0] != 0 &&
           fabsf(door->velocity[0]) < 0.01f, "door arrives on the grid with a tiny final push pending");
+    CHECK(grenade->groundentity_linkcount == door->linkcount, "grenade has seen the door's last real move");
     h_check_stationary_support(door, grenade, 1);
     CHECK(door->moveinfo.state == H_STATE_TOP, "door finishes its move after the final push");
 }
