@@ -2977,7 +2977,78 @@ static void sc_t24_plat_fuse(void)
           "riding grenade explodes at its carried height (offset %.4f, expected %.4f)", h_plat_blast_offset, offset);
 }
 
+static edict_t *h_stationary_support;
+static int h_stationary_contacts;
+static void (*h_stationary_touch)(edict_t *, edict_t *, cplane_t *, csurface_t *);
+
+static void h_count_stationary_contact(edict_t *self, edict_t *other, cplane_t *plane, csurface_t *surf)
+{
+    h_stationary_contacts += other == h_stationary_support;
+    h_stationary_touch(self, other, plane, surf);
+}
+
+static void h_check_stationary_support(edict_t *pusher, edict_t *grenade, int windows)
+{
+    CHECK(grenade->groundentity == pusher, "grenade rests on the pusher before stationary windows");
+    h_stationary_support = pusher;
+    h_stationary_contacts = 0;
+    h_stationary_touch = grenade->touch;
+    grenade->touch = h_count_stationary_contact;
+    vec3_t origin;
+    VectorCopy(pusher->s.origin, origin);
+    int lost = 0, moved = 0, links = pusher->linkcount;
+    for (int i = 0; i < windows * h_div; i++) {
+        h_frame();
+        moved += !VectorCompare(pusher->s.origin, origin);
+        lost += grenade->groundentity != pusher;
+    }
+    grenade->touch = h_stationary_touch;
+    CHECK(!moved, "pusher stays in place throughout %d grid windows", windows);
+    if (h_div == 1) {
+        CHECK(pusher->linkcount - links == windows, "10 Hz still relinks a stationary push");
+    } else {
+        CHECK(!lost && !h_stationary_contacts,
+              "stationary push keeps grenade support without contact (lost %d, contacts %d)",
+              lost, h_stationary_contacts);
+    }
+}
+
+static void sc_t24_plat_zero_push(void)
+{
+    h_scene_base();
+    int model = h_add_inline(-64, 1936, 256, 64, 2064, 320);
+    h_ent("{\n\"classname\" \"func_plat\"\n\"model\" \"*%d\"\n\"height\" \"256\"\n}\n", model);
+    h_start(h_ents);
+    edict_t *player = h_join(0, "p1"), *plat = h_by_model("*1");
+    edict_t *grenade = h_plat_object(player, plat, H_PLAT_GRENADE);
+    h_frames_n(h_rate);
+    h_frames_n(h_grid_wait());
+    /* Two windows of travel add up to less than half a position quantum. */
+    plat->velocity[0] = 0.25f;
+    h_check_stationary_support(plat, grenade, 2);
+}
+
 #ifdef HARNESS_OPENTDM
+static void sc_t24_door_final_push(void)
+{
+    h_scene_base();
+    int model = h_add_inline(-64, 1936, 256, 64, 2064, 320);
+    h_ent("{\n\"classname\" \"func_door\"\n\"model\" \"*%d\"\n\"speed\" \"90\"\n"
+          "\"targetname\" \"open\"\n\"wait\" \"-1\"\n}\n", model);
+    h_start(h_ents);
+    edict_t *player = h_join(0, "p1"), *door = h_by_model("*1");
+    edict_t *grenade = h_plat_object(player, door, H_PLAT_GRENADE);
+    h_frames_n(h_rate);
+    h_frames_n(h_grid_wait());
+    door->use(door, player, player);
+    /* The deferred start takes two frames, followed by 40 travel frames. */
+    h_frames_n(42);
+    CHECK(!h_grid_wait() && door->s.origin[0] == 120 && door->velocity[0] != 0 &&
+          fabsf(door->velocity[0]) < 0.01f, "door arrives on the grid with a tiny final push pending");
+    h_check_stationary_support(door, grenade, 1);
+    CHECK(door->moveinfo.state == H_STATE_TOP, "door finishes its move after the final push");
+}
+
 static edict_t *h_view_player(void)
 {
     edict_t *a, *b;
@@ -7024,6 +7095,10 @@ static const struct { const char *name; void (*run)(void); } h_scenarios[] = {
 #endif
     { "t24_plat_late_support", sc_t24_plat_late_support },
     { "t24_plat_fuse", sc_t24_plat_fuse },
+    { "t24_plat_zero_push", sc_t24_plat_zero_push },
+#ifdef HARNESS_OPENTDM
+    { "t24_door_final_push", sc_t24_door_final_push },
+#endif
     { "t24_crush_overflow_count", sc_t24_crush_overflow_count },
 #ifdef HARNESS_OPENTDM
     { "t24_view_timeout_fall", sc_t24_view_timeout_fall },

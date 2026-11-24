@@ -137,6 +137,8 @@ Engine scenarios decode snapshots for the available recipients at 10–60 Hz
 and exercise the dynamic game loader, DM2 and MVD. Grid negative controls
 check named assertion failures where an assertion is specified.
 
+Grenades stay supported without another impact when a slow platform or OpenTDM's final door push rounds to zero above 10 Hz.
+
 At 10 Hz the scenarios include the hurt-zone sound and the expiring
 dropped quad in both mods, plus OpenTDM's second short tap and linear mover
 resumption after a timeout. The suite does not include the separate comparison

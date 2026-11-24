@@ -1085,9 +1085,11 @@ static int h_listed(const char *name)
         return H_ENGINE == engine_only;
     }
     if (!strncmp(name, "t24_", 4)) {
+        if (!strcmp(name, "t24_door_final_push")) return h_rate == 60;
         if (!strcmp(name, "t24_grid_solid")) return H_ENGINE;
         if (!strcmp(name, "t24_plat_real_debris")) return H_ENGINE;
         if (!strcmp(name, "t24_plat_object") || !strcmp(name, "t24_plat_object_linear") ||
+            !strcmp(name, "t24_plat_zero_push") ||
             !strcmp(name, "t24_toss_free") ||
             !strcmp(name, "t24_toss_bounce") || !strcmp(name, "t24_toss_wall_toggle")) return 1;
         int engine_only = !strcmp(name, "t24_toss_drop") || !strcmp(name, "t24_toss_edge") ||
