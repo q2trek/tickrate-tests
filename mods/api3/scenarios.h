@@ -6826,7 +6826,6 @@ static void sc_t23_movers_wait(void)
 #include "timeout_grenade.h"
 #include "item_grid_edges.h"
 
-#ifdef HARNESS_ENGINE
 static void sc_unlag_default(void)
 {
     h_scene_base();
@@ -6834,7 +6833,6 @@ static void sc_unlag_default(void)
     cvar_t *mode = h_cvar_find("g_unlag");
     CHECK(mode && mode->value == 0, "g_unlag is registered and off by default");
 }
-#endif
 
 static const struct { const char *name; void (*run)(void); } h_scenarios[] = {
     { "item_grid_dropped_quad_expiry", sc_item_grid_dropped_quad_expiry },
@@ -7053,7 +7051,6 @@ static const struct { const char *name; void (*run)(void); } h_scenarios[] = {
 #endif
 #endif
 #ifdef HARNESS_ENGINE
-    { "unlag_default", sc_unlag_default },
     { "unlag_fixture", sc_unlag_fixture },
     { "unlag_rail", sc_unlag_rail },
     { "unlag_no_extension", sc_unlag_no_extension },
@@ -7081,5 +7078,6 @@ static const struct { const char *name; void (*run)(void); } h_scenarios[] = {
     { "unlag_match_stats", sc_unlag_match_stats },
 #endif
 #endif
+    { "unlag_default", sc_unlag_default },
     { NULL, NULL }
 };
