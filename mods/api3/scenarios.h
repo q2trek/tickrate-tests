@@ -2698,7 +2698,7 @@ static edict_t *h_plat_object(edict_t *player, edict_t *plat, int kind)
         fire_grenade(player, start, dir, 120, 0, fuse, 160);
         obj = h_by_class("grenade", 0);
     } else {
-        fire_grenade2(player, start, dir, 125, 0, 30 * h_rate, 165, false);
+        fire_grenade2(player, start, dir, 125, 0, fuse, 165, false);
         obj = h_by_class("hgrenade", 0);
     }
     if (!obj) imp_error("platform object did not spawn");
@@ -3827,7 +3827,7 @@ static edict_t *h_toss_spawn(edict_t *player, int kind, vec3_t start, const vec3
         int timer = fuse * h_div;
 #endif
         if (kind == H_TOSS_HAND_GRENADE)
-            fire_grenade2(player, start, dir, 125, 0, fuse * h_div, 165, false);
+            fire_grenade2(player, start, dir, 125, 0, timer, 165, false);
         else
             fire_grenade(player, start, dir, 120, 0, timer, 160);
         obj = h_by_class(kind == H_TOSS_HAND_GRENADE ? "hgrenade" : "grenade", 0);
@@ -7098,8 +7098,12 @@ static const struct { const char *name; void (*run)(void); } h_scenarios[] = {
     { "t24_plat_late_support", sc_t24_plat_late_support },
     { "t24_plat_fuse", sc_t24_plat_fuse },
     { "t24_grenade_windows", sc_t24_grenade_windows },
-    { "t24_short_actions", sc_t24_short_actions },
+    { "t24_short_explosion", sc_t24_short_explosion },
+    { "t24_short_relay", sc_t24_short_relay },
+    { "t24_short_timer", sc_t24_short_timer },
+    { "t24_short_repeat", sc_t24_short_repeat },
 #ifdef HARNESS_OPENTDM
+    { "t24_short_item_respawn", sc_t24_short_item_respawn },
     { "t24_timeout_blocked_rider", sc_t24_timeout_blocked_rider },
 #endif
     { "t24_plat_zero_push", sc_t24_plat_zero_push },

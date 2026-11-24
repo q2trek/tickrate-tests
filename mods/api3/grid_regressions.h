@@ -1,12 +1,19 @@
 static void sc_t24_grenade_windows(void)
 {
-    edict_t *p = h_armed("grenades", "grenades", 64);
+    edict_t *p = h_armed("grenades", "grenades", 5);
     h_frames_n(h_grid_wait());
     VectorClear(p->client->v_angle);
 
-    for (int windows = 32; windows >= 0; windows--) {
+#ifdef HARNESS_OPENTDM
+    int step = 1;
+#else
+    int step = h_div;
+#endif
+    for (int remaining = 32 * h_div; remaining >= 0; remaining -= step) {
         int frame = level.framenum, mark = h_nmsgs;
-        p->client->grenade_framenum = frame + windows * h_div;
+        int windows = remaining / h_div;
+        p->client->grenade_framenum = frame + remaining;
+        p->client->inventory[p->client->ammo_index] = 1;
         p->client->weaponstate = WEAPON_FIRING;
 #ifdef HARNESS_OPENTDM
         p->client->ps.gunframe = 12;
@@ -17,121 +24,138 @@ static void sc_t24_grenade_windows(void)
 #endif
         Think_Weapon(p);
         edict_t *grenade = h_grenade();
-        if (!windows) {
+        if (!remaining) {
             CHECK(!grenade && h_explosions(mark) == 1, "zero remaining windows explode immediately");
             continue;
         }
-        CHECK(grenade != NULL, "hand grenade with %d remaining windows is thrown", windows);
+        CHECK(grenade != NULL, "positive fuse starts a throw (%d world frames left)", remaining);
         if (!grenade) continue;
         CHECK(grenade->nextthink == frame + windows * h_div,
-              "hand grenade keeps its exact remaining fuse windows (%d left, got %d world frames, want %d)",
-              windows, grenade->nextthink - frame, windows * h_div);
+              "hand grenade keeps its exact remaining fuse windows (%d frames left, got %d world frames, want %d)",
+              remaining, grenade->nextthink - frame, windows * h_div);
         CHECK(grenade->velocity[0] == expected_speed,
-              "hand grenade uses its classic launch speed (%d windows left, got %.0f, want %d)",
-              windows, grenade->velocity[0], expected_speed);
+              "hand grenade uses its classic launch speed (%d frames left, got %.0f, want %d)",
+              remaining, grenade->velocity[0], expected_speed);
         G_FreeEdict(grenade);
     }
 }
 
 static int h_short_action_frame;
-static edict_t *h_short_respawn;
 
 static void h_short_action_mark(edict_t *self, edict_t *other, edict_t *activator)
 {
     h_short_action_frame = h_frames;
 }
 
+#ifdef HARNESS_OPENTDM
+static edict_t *h_short_respawn;
+
 static void h_short_action_respawn(edict_t *self, edict_t *other, edict_t *activator)
 {
-    SetRespawn(h_short_respawn, 0.05f);
+    h_short_respawn->touch(h_short_respawn, activator, NULL, NULL);
 }
+#endif
 
-static edict_t *h_short_action_target(const char *name)
-{
-    return G_Find(NULL, FOFS(targetname), (char *)name);
-}
+enum { H_SHORT_EXPLOSION, H_SHORT_RELAY, H_SHORT_TIMER, H_SHORT_REPEAT, H_SHORT_ITEM };
 
-enum { H_SHORT_EXPLOSION, H_SHORT_RELAY, H_SHORT_TIMER, H_SHORT_REPEAT, H_SHORT_ITEM, H_SHORT_COUNT };
-
-static const char *const h_short_classes[] = {
-    "target_explosion", "trigger_relay", "func_timer", "trigger_multiple", "ammo_shells"
+static const struct { const char *classname, *keys; } h_short_actions[] = {
+    { "target_explosion", "\"target\" \"short_result\"\n\"delay\" \"0.05\"\n" },
+    { "trigger_relay", "\"target\" \"short_result\"\n\"delay\" \"0.05\"\n" },
+    { "func_timer", "\"wait\" \"60\"\n\"delay\" \"0.05\"\n" },
+    { "trigger_multiple", "\"model\" \"*1\"\n\"wait\" \"0.05\"\n" },
+    { "ammo_shells", "\"origin\" \"0 2000 64\"\n" },
 };
 
-static void h_add_short_actions(int side)
+static void h_add_short_action(int kind, int side)
 {
-    for (int kind = 0; kind < H_SHORT_COUNT; kind++)
-        h_ent("{\n\"classname\" \"%s\"\n\"targetname\" \"short%d_%d\"\n\"target\" \"short_result\"\n%s}\n",
-              h_short_classes[kind], side, kind,
-              kind == H_SHORT_REPEAT ? "\"model\" \"*1\"\n\"wait\" \"0.05\"\n" :
-              kind == H_SHORT_ITEM ? "\"origin\" \"0 2000 64\"\n" : "\"delay\" \"0.05\"\n");
+    h_ent("{\n\"classname\" \"%s\"\n\"targetname\" \"short%d\"\n%s}\n",
+          h_short_actions[kind].classname, side, h_short_actions[kind].keys);
 }
 
-static void sc_t24_short_actions(void)
+static void h_short_action(int kind)
 {
+#ifdef HARNESS_OPENTDM
+    if (kind == H_SHORT_ITEM)
+        h_set_override("g_respawn_ammo", "0.05");
+#endif
     h_scene_base();
-    h_add_inline(-32, 1936, 0, 32, 2064, 64);
-    h_ent("{\n\"classname\" \"info_notnull\"\n\"targetname\" \"short_gap\"\n}\n");
-    h_add_short_actions(0);
+    if (kind == H_SHORT_REPEAT)
+        h_add_inline(-32, 1936, 0, 32, 2064, 64);
+    if (kind == H_SHORT_RELAY)
+        h_ent("{\n\"classname\" \"info_notnull\"\n\"targetname\" \"short_gap\"\n}\n");
+    h_add_short_action(kind, 0);
     h_ent("{\n\"classname\" \"func_timer\"\n\"targetname\" \"short_source\"\n\"wait\" \"60\"\n}\n");
-    h_add_short_actions(1);
+    h_add_short_action(kind, 1);
     h_start(h_ents);
-    edict_t *p = h_join(0, "p1"), *source = h_short_action_target("short_source");
-    edict_t *gap = h_short_action_target("short_gap");
+    edict_t *p = h_join(0, "p1"), *source = G_Find(NULL, FOFS(targetname), "short_source");
+    edict_t *gap = G_Find(NULL, FOFS(targetname), "short_gap");
     edict_t *sink = G_Spawn();
     sink->targetname = "short_result";
-    if (!source || !gap) imp_error("short action fixtures missing");
+    sink->use = h_short_action_mark;
+    if (!source || (kind == H_SHORT_RELAY && !gap))
+        imp_error("short action fixtures missing");
     h_frames_n(h_div * 2);
 
     for (int side = 1; side >= 0; side--) {
-        for (int kind = 0; kind < H_SHORT_COUNT; kind++) {
-            char target[32];
-            snprintf(target, sizeof(target), "short%d_%d", side, kind);
-            edict_t *action = h_short_action_target(target);
-            if (!action || ((NUM(action) > NUM(source)) != side))
-                imp_error("short action fixture has wrong slot order");
-            if (kind == H_SHORT_TIMER) {
-                action->target = NULL;
-                action->wait = 60.0f;
-            }
-            sink->use = kind == H_SHORT_ITEM ? h_short_action_respawn : h_short_action_mark;
+        edict_t *action = G_Find(NULL, FOFS(targetname), side ? "short1" : "short0");
+        if (!action || ((NUM(action) > NUM(source)) != side))
+            imp_error("short action fixture has wrong slot order");
+        h_short_action_frame = -1;
+        h_frames_n(h_grid_wait());
+        int start = h_frames, observed = -1;
+        if (kind == H_SHORT_RELAY && !side)
+            G_FreeEdict(gap);
+        source->target = action->targetname;
+#ifdef HARNESS_OPENTDM
+        int ammo = 0;
+        if (kind == H_SHORT_ITEM) {
+            if (action->solid != SOLID_TRIGGER || !action->touch || !action->item)
+                imp_error("short item is not ready to pick up");
+            ammo = ITEM_INDEX(action->item);
+            p->client->inventory[ammo] = 0;
             h_short_respawn = action;
-            h_short_action_frame = -1;
-            h_frames_n(h_grid_wait());
-            int start = h_frames, observed = -1;
-            if (!side && kind == H_SHORT_RELAY) G_FreeEdict(gap);
-            source->target = kind == H_SHORT_ITEM ? sink->targetname : action->targetname;
-            source->activator = p;
-            source->nextthink = level.framenum;
-            for (int i = 0; i <= h_div; i++) {
-                int frame = h_frames;
-                h_frame();
-                if (kind == H_SHORT_RELAY && !side && !i)
-                    CHECK(gap->inuse && !strcmp(gap->classname, "DelayedUse"), "relay uses the earlier slot");
-                if (kind == H_SHORT_REPEAT && action->nextthink == 0) {
-                    observed = frame;
-                    break;
-                }
-                if (kind == H_SHORT_ITEM && action->solid == SOLID_TRIGGER) {
-                    observed = frame;
-                    break;
-                }
-                if (kind == H_SHORT_TIMER && action->nextthink > level.framenum + h_rate) {
-                    observed = frame;
-                    break;
-                }
-                if (kind < H_SHORT_TIMER && h_short_action_frame >= 0) {
-                    observed = h_short_action_frame;
-                    break;
-                }
-            }
-            CHECK(observed == start + (side ? 0 : h_div),
-                  "short delayed action waits for the grid (%s %s source, got %+d frames, want %d)",
-                  h_short_classes[kind], side ? "after" : "before", observed - start, side ? 0 : h_div);
-            source->nextthink = 0;
-            action->nextthink = 0;
+            sink->use = h_short_action_respawn;
+            source->target = sink->targetname;
         }
+#endif
+        source->activator = p;
+        source->nextthink = level.framenum;
+        for (int i = 0; i <= h_div; i++) {
+            int frame = h_frames;
+            h_frame();
+            if (kind == H_SHORT_RELAY && !side && !i)
+                CHECK(gap->inuse && !strcmp(gap->classname, "DelayedUse"), "relay uses the earlier slot");
+            if ((kind == H_SHORT_REPEAT && !action->nextthink) ||
+                (kind == H_SHORT_TIMER && action->nextthink > level.framenum + h_rate) ||
+                (kind == H_SHORT_ITEM && action->solid == SOLID_TRIGGER)) {
+                observed = frame;
+                break;
+            }
+            if (kind < H_SHORT_TIMER && h_short_action_frame >= 0) {
+                observed = h_short_action_frame;
+                break;
+            }
+        }
+#ifdef HARNESS_OPENTDM
+        if (kind == H_SHORT_ITEM)
+            CHECK(p->client->inventory[ammo] > 0, "picked up ammo before short respawn");
+#endif
+        CHECK(observed == start + (side ? 0 : h_div),
+              "short delayed action waits for the grid (%s %s source, got %+d frames, want %d)",
+              h_short_actions[kind].classname, side ? "after" : "before", observed - start, side ? 0 : h_div);
+        source->nextthink = 0;
+        action->nextthink = 0;
     }
 }
+
+static void sc_t24_short_explosion(void) { h_short_action(H_SHORT_EXPLOSION); }
+static void sc_t24_short_relay(void) { h_short_action(H_SHORT_RELAY); }
+static void sc_t24_short_timer(void) { h_short_action(H_SHORT_TIMER); }
+static void sc_t24_short_repeat(void) { h_short_action(H_SHORT_REPEAT); }
+
+#ifdef HARNESS_OPENTDM
+static void sc_t24_short_item_respawn(void) { h_short_action(H_SHORT_ITEM); }
+#endif
 
 #ifdef HARNESS_OPENTDM
 static void h_place_blocked_rider(edict_t *rider, edict_t *plat)
