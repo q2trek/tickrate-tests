@@ -45,9 +45,9 @@ neg-client-main | q2pro/src/client/main.c | client | 60 | t02_timeline | @master
 neg-packetdup-loopback | q2pro/src/server/user.c | client:new:0:bcl-dup | 60 | t06_packetdup_loopback | s/^        if (sv_client->netchan.remote_address.type == NA_LOOPBACK) {$/        if (0) {/
 
 # OpenFFA
-neg-openffa-hurt | openffa/g_trigger.c | api3:box | 10 | * | s/self->timestamp = level.framenum + 0.1f \* HZ;/self->timestamp = level.framenum + 0.2f * HZ;/
-neg-openffa-hurt-sound-10 | openffa/g_trigger.c | api3:box | 10 | t11_hurt_normal t11_hurt_shared t11_hurt_toggle | @master
-neg-openffa-hurt-sound-60 | openffa/g_trigger.c | api3:box | 60 | t11_hurt_normal t11_hurt_shared t11_hurt_toggle | @master
+neg-openffa-hurt | openffa/g_trigger.c | api3:box | 10 | * | s/self->timestamp = window + FRAMEDIV;/self->timestamp = window + 2 * FRAMEDIV;/
+neg-openffa-hurt-sound-10 | openffa/g_trigger.c | api3:box | 10 | t11_hurt_sound_grid | s/if (!(self->spawnflags & 4) && window %.*/if (!(self->spawnflags \& 4))/ | assertion:off-second SLOW contact
+neg-openffa-hurt-sound-60 | openffa/g_trigger.c | api3:box | 60 | t11_hurt_sound_grid | s/if (!(self->spawnflags & 4) && window %.*/if (!(self->spawnflags \& 4))/ | assertion:off-second SLOW contact
 neg-openffa-rotating-touch | openffa/g_func.c | api3:box | 10 | * | /^static void rotating_touch/,/^}/s/if (self->avelocity\[0\] || self->avelocity\[1\] || self->avelocity\[2\])/if (0)/
 neg-openffa-grenade-fuse | openffa/p_weapon.c | api3:box | 10 | * | s/#define GRENADE_TIMER       (3 \* HZ)/#define GRENADE_TIMER       (4 * HZ)/
 neg-openffa-pending | openffa/p_client.c | api3:box | 60 | t09_rocket_second_tap | s/^            client->attack_pending = true;$/            (void)0;/
@@ -71,27 +71,27 @@ neg-openffa-carry-reset | openffa/g_func.c | api3:engine | 60 | t13_carry_reset 
 # SV_Push without its ground shortcut leaves the rider behind
 neg-openffa-ground | openffa/g_phys.c | api3:engine | 60 | t13_team_block t14_plat | 0,/^        if (check->groundentity != pusher) {$/s//        if (1) {/
 # a client carried by a pusher without a usercmd loses its ground
-neg-openffa-ground-recheck | openffa/g_main.c | api3:engine | 60 | * | s/trace.ent == ent->groundentity \&\& trace.plane.normal\[2\] >= 0.7f)$/0)/
+neg-openffa-ground-recheck | openffa/g_main.c | api3:engine | 60 | * | s/!trace.startsolid && !trace.allsolid && trace.ent == ground &&/false \&\& trace.ent == ground \&\&/
 neg-openffa-rotating-ride | openffa/g_func.c | api3:engine | 60 | t12_rotating_ride | /^\(static \)\{0,1\}void rotating_touch/,/^}/s/if (self->avelocity\[0\] || self->avelocity\[1\] || self->avelocity\[2\])/if (0)/
 # the carry ends with its edict: kept over the SpawnEntities memset it must fail
 neg-openffa-carry-map | openffa/g_spawn.c | api3:engine | 60 | t13_carry_map | s/^    memset(g_edicts, 0, game.maxentities \* sizeof(g_edicts\[0\]));$/    { static vec3_t k[MAX_EDICTS]; for (int j = 0; j < game.maxentities; j++) VectorCopy(g_edicts[j].push_carry, k[j]); memset(g_edicts, 0, game.maxentities * sizeof(g_edicts[0])); for (int j = 0; j < game.maxentities; j++) VectorCopy(k[j], g_edicts[j].push_carry); }/
 
 # OpenTDM
-neg-opentdm-hurt | opentdm/g_trigger.c | api3:box | 10 | * | s/self->touch_debounce_framenum = level.framenum + SECS_TO_FRAMES(0.1f);/self->touch_debounce_framenum = level.framenum + SECS_TO_FRAMES(0.2f);/
-neg-opentdm-hurt-sound-10 | opentdm/g_trigger.c | api3:box | 10 | t11_hurt_normal t11_hurt_shared t11_hurt_toggle | @master
-neg-opentdm-hurt-sound-60 | opentdm/g_trigger.c | api3:box | 60 | t11_hurt_normal t11_hurt_shared t11_hurt_toggle | @master
+neg-opentdm-hurt | opentdm/g_trigger.c | api3:box | 10 | * | s/self->touch_debounce_framenum = window + SECS_TO_FRAMES(0.1f);/self->touch_debounce_framenum = window + SECS_TO_FRAMES(0.2f);/
+neg-opentdm-hurt-sound-10 | opentdm/g_trigger.c | api3:box | 10 | t11_hurt_sound_grid | s/if (!(self->spawnflags & 4) && window %.*/if (!(self->spawnflags \& 4))/ | assertion:off-second SLOW contact
+neg-opentdm-hurt-sound-60 | opentdm/g_trigger.c | api3:box | 60 | t11_hurt_sound_grid | s/if (!(self->spawnflags & 4) && window %.*/if (!(self->spawnflags \& 4))/ | assertion:off-second SLOW contact
 neg-opentdm-rotating-touch | opentdm/g_func.c | api3:box | 10 | * | /^void rotating_touch/,/^}/s/if (self->avelocity\[0\] || self->avelocity\[1\] || self->avelocity\[2\])/if (0)/
-neg-opentdm-pending | opentdm/p_client.c | api3:box | 60 | t09_rocket_tick_tap t09_machinegun_tick_tap | /if (!client->weapon_thunk) {/,/}/s/^                client->attack_pending = true;$/                (void)0;/
-neg-opentdm-batch-tap | opentdm/p_client.c | api3:box | 60 | t09_machinegun_batch_taps | /} else if (new_attack) {/,/}/s/^                client->attack_pending = true;$/                (void)0;/
+neg-opentdm-pending | opentdm/p_client.c | api3:box | 60 | t09_rocket_tick_tap t09_machinegun_tick_tap | /if (!client->weapon_thunk) {/,/}/s/^                Think_Weapon(ent);$/                (void)0;/
+neg-opentdm-batch-tap | opentdm/p_client.c | api3:box | 60 | * | s/if (!client->weapon_thunk \&\& client->pers.team) {/if ((!client->weapon_thunk || (client->latched_buttons \& BUTTON_ATTACK)) \&\& client->pers.team) {\n        client->buttons |= client->latched_buttons \& BUTTON_ATTACK;/
 # fire released during a timeout: the buttons of before the pause fire on resume
-neg-opentdm-timeout-release | opentdm/p_client.c | api3:box | 60 | t09_timeout_release_mg t10_timeout_release_grenade | /if (tdm_match_status == MM_TIMEOUT) {/,/}/s/^            client->buttons = ucmd->buttons;$/            (void)0;/
+neg-opentdm-timeout-release | opentdm/p_client.c | api3:box | 60 | t09_timeout_release_mg t10_timeout_release_grenade | /if (tdm_match_status == MM_TIMEOUT || GAME_FROZEN) {/,/}/s/^            client->buttons = ucmd->buttons;$/            (void)0;/
 # a grenade held through the pause stays armed: clearing the buttons throws it
-neg-opentdm-timeout-hold | opentdm/p_client.c | api3:box | 60 | t10_timeout_hold_grenade | /if (tdm_match_status == MM_TIMEOUT) {/,/}/s/^            client->buttons = ucmd->buttons;$/            client->buttons = 0;/
+neg-opentdm-timeout-hold | opentdm/p_client.c | api3:box | 60 | t10_timeout_hold_grenade | /if (tdm_match_status == MM_TIMEOUT || GAME_FROZEN) {/,/}/s/^            client->buttons = ucmd->buttons;$/            client->buttons = 0;/
 neg-opentdm-bfg-backoff | opentdm/g_weapon.c | api3:box | 60 | t11_bfg_wall | s/VectorMA(self->s.origin, -0.1f, self->velocity, self->s.origin);/VectorMA(self->s.origin, -1 * FRAMETIME, self->velocity, self->s.origin);/
-neg-opentdm-bfg-explode | opentdm/g_weapon.c | api3:box | 60 | t11_bfg_wall | /^void bfg_touch(/,/^}/s/self->nextthink = level.framenum + SECS_TO_FRAMES(0.1f);/self->nextthink = level.framenum + 1;/
-neg-opentdm-bfg-first-laser | opentdm/g_weapon.c | api3:box | 60 | t11_bfg_wall | /^void fire_bfg(/,/^}/s/bfg->nextthink = level.framenum + SECS_TO_FRAMES(0.1f);/bfg->nextthink = level.framenum + 1;/
+neg-opentdm-bfg-explode | opentdm/g_weapon.c | api3:box | 60 | t11_bfg_wall | /^void bfg_touch(/,/^}/s/self->nextthink = level.framenum + SECS_TO_FRAMES(0.1f);/self->nextthink = level.framenum + 2 * SECS_TO_FRAMES(0.1f);/
+neg-opentdm-bfg-first-laser | opentdm/g_weapon.c | api3:box | 60 | t11_bfg_wall | /^void fire_bfg(/,/^}/s/bfg->nextthink = G_WindowFrame(level.framenum) + G_GridFrames(0.1f);/bfg->nextthink = G_WindowFrame(level.framenum) + G_GridFrames(0.2f);/
 neg-opentdm-viper-roll | opentdm/g_misc.c | api3:engine | 60 | t13_viper_bomb_roll | s/= diff + 100.0f \* FRAMETIME;/= diff + 10;/
-neg-opentdm-pending-resume | opentdm/g_tdm_core.c | api3:box | 60 | t09_lifecycle_timeout | s/^                ent->client->attack_pending = false;$/                (void)0;/
+neg-opentdm-pending-resume | opentdm/p_client.c | api3:box | 60 | t09_lifecycle_timeout | /if (tdm_match_status == MM_TIMEOUT || GAME_FROZEN) {/,/}/s/^            client->buttons = ucmd->buttons;$/            client->buttons |= ucmd->buttons;/
 neg-opentdm-crush-free | opentdm/g_utils.c | api3:box | 10 | * | s/^            level.crush\[i\].framenum = 0;$/            (void)0;/
 neg-opentdm-crush-limit | opentdm/g_utils.c | api3:box | 60 | t12_door_crusher t12_crush_phases t12_falling_object_moving | s/level.framenum + SECS_TO_FRAMES(0.1f);/level.framenum + 1;/
 neg-opentdm-rate-zero | opentdm/g_tdm_core.c | api3:box | 60 | t01_rate_zero | s/SERVER_FPS < 10 || //
@@ -100,15 +100,15 @@ neg-opentdm-hud-ceil | opentdm/g_tdm_core.c | api3:box | 60 | t15_countdown_hud 
 neg-opentdm-timeout-ceil | opentdm/g_tdm_core.c | api3:box | 60 | t15_timeout_hud | s/^        secs = (timeout_remaining + SERVER_FPS - 1) \/ SERVER_FPS;$/        secs = ceil((float) timeout_remaining * FRAMETIME);/
 neg-opentdm-screenshot | opentdm/g_tdm_core.c | api3:box | 60 | t15_match_hud | s/ - SECS_TO_FRAMES (0.5f)) {$/ - 5) {/
 neg-opentdm-players | opentdm/g_cmds.c | api3:box | 60 | t15_players_time | s/enterframe) \/ SECS_TO_FRAMES(60),$/enterframe) \/ 600,/
-neg-opentdm-readyattn | opentdm/p_weapon.c | api3:box | 10 | * | /g_ready_attention->value/,/}/{/attack_pending = false/d}
-neg-opentdm-votehold | opentdm/p_weapon.c | api3:box | 10 | * | /g_vote_attention->value/,/}/{/attack_pending = false/d}
+neg-opentdm-readyattn | opentdm/p_weapon.c | api3:box | 10 | t09_lifecycle_readyattn | /g_ready_attention->value/,/}/{/buttons \&= ~BUTTON_ATTACK/d}
+neg-opentdm-votehold | opentdm/p_weapon.c | api3:box | 10 | t09_lifecycle_votehold | /g_vote_attention->value/,/}/{/buttons \&= ~BUTTON_ATTACK/d}
 neg-opentdm-rate-refuse | opentdm/g_tdm_core.c | api3:box | 60 | t01_rate_refuse | s/^    if (SERVER_FPS < 10 || SERVER_FPS % 10 != 0 || SERVER_FPS > UNLAG_MAX_FPS) {$/    if (SERVER_FPS < 10 || SERVER_FPS > UNLAG_MAX_FPS) {/
 neg-opentdm-carry | opentdm/g_phys.c | api3:engine | 60 | t13_linear_door | s/^        pusher->push_carry\[i\] = temp - r;$/        (void)0;/
 neg-opentdm-carry-rollback | opentdm/g_phys.c | api3:engine | 60 | t13_team_block | s/^            VectorCopy(p->carry, p->ent->push_carry);$/            (void)0;/
 neg-opentdm-carry-rollback-team | opentdm/g_phys.c | api3:engine | 60 | t13_team_block | s/^            VectorCopy(p->carry, p->ent->push_carry);$/            if (p == pushed) VectorCopy(p->carry, p->ent->push_carry);/
 neg-opentdm-carry-reset | opentdm/g_func.c | api3:engine | 60 | t13_carry_reset t13_train_teleport | s/^    VectorClear(ent->push_carry);   \/\/ a new path.*$/    (void)0;/
 neg-opentdm-ground | opentdm/g_phys.c | api3:engine | 60 | t13_team_block t14_plat | 0,/^        if (check->groundentity != pusher) {$/s//        if (1) {/
-neg-opentdm-ground-recheck | opentdm/g_main.c | api3:engine | 60 | * | s/\&\& trace.ent == ent->groundentity$/\&\& 0/
+neg-opentdm-ground-recheck | opentdm/g_main.c | api3:engine | 60 | * | s/!trace.startsolid && !trace.allsolid && trace.ent == ground &&/false \&\& trace.ent == ground \&\&/
 neg-opentdm-rotating-ride | opentdm/g_func.c | api3:engine | 60 | t12_rotating_ride | /^\(static \)\{0,1\}void rotating_touch/,/^}/s/if (self->avelocity\[0\] || self->avelocity\[1\] || self->avelocity\[2\])/if (0)/
 neg-opentdm-carry-restart | opentdm/g_utils.c | api3:engine | 60 | t13_carry_map | s/^    memset(ed, 0, sizeof(\*ed));$/    { vec3_t k; VectorCopy(ed->push_carry, k); memset(ed, 0, sizeof(*ed)); VectorCopy(k, ed->push_carry); }/
 neg-opentdm-accel-final | opentdm/g_func.c | api3:engine | 60 | t14_plat | s/^        AccelMove_Final(ent);$/        Move_Final(ent);/
@@ -121,10 +121,10 @@ neg-opentdm-feedback | opentdm/p_view.c | api3:box | 60 | t18_flash_window t18_b
 neg-opentdm-gun-sway | opentdm/p_view.c | api3:box | 60 | t18_gun_sway | /void SV_CalcGunOffset/,/^}/s/if (!FRAMESYNC)/if (0)/ | /void ClientEndServerFrame/,/^}/s/if (FRAMESYNC)/if (1)/
 neg-opentdm-bob-air | opentdm/p_view.c | api3:box | 60 | t18_bob_air | s/^        bobmove = 0;$/        bobmove = 0.0625f;/
 neg-opentdm-burn | opentdm/p_view.c | api3:box | 60 | t18_lava_sound | s/+ SECS_TO_FRAMES(1);/+ SECS_TO_FRAMES(0.1f);/
-neg-opentdm-pain | opentdm/p_view.c | api3:box | 60 | t18_fall_pain t18_drown_pain | s/+ SECS_TO_FRAMES(0.1f) - 1/ + 0/g
-neg-opentdm-powerup-warning | opentdm/p_view.c | api3:box | 60 | t18_powerup_warn_timeout | s/qboolean warn = tdm_match_status != MM_TIMEOUT;/qboolean warn = true;/
-neg-opentdm-kick-clock | opentdm/p_view.c | api3:box | 60 | t18_kick_timeout | /void SV_CalcViewOffset/,/^}/s/if (FRAMESYNC)/if ((level.framenum % SECS_TO_FRAMES(0.1f)) == 0)/
-neg-opentdm-environment-clock | opentdm/p_view.c | api3:box | 60 | t18_environment_resume | /void P_WorldEffects/,/^}/s/if (FRAMESYNC)/if ((level.framenum % SECS_TO_FRAMES(0.1f)) == 0)/
+neg-opentdm-pain | opentdm/p_view.c | api3:box | 60 | t18_fall_pain t18_drown_pain | s/+ SECS_TO_FRAMES(0.1f) - 1/ - 1/g
+neg-opentdm-powerup-warning | opentdm/p_view.c | api3:box | 60 | t18_powerup_warn_timeout | s/qboolean warn = !GAME_FROZEN;/qboolean warn = !GAME_FROZEN \&\& !level.timeout_frozen;/ | assertion:powerup warns once on the first unfrozen grid frame
+neg-opentdm-kick-clock | opentdm/p_view.c | api3:box | 60 | t18_kick_timeout | /void SV_CalcViewOffset/,/^}/s/if (FRAMESYNC)/if (FRAMESYNC \&\& tdm_match_status != MM_TIMEOUT)/
+neg-opentdm-environment-clock | opentdm/p_view.c | api3:box | 60 | t18_environment_resume | /void P_WorldEffects/,/^}/{/if (!FRAMESYNC)/,+1d;} | assertion:lava damage on real grid
 
 # Remote history reserve, anchors, path selection and presentation clock.
 neg-remote-reserve | q2pro/src/client/remote_lerp.c | remote | 60 | * | s/fminf(r->extra + I, I + RL_MAX_EXTRA)/r->extra/
@@ -135,10 +135,10 @@ neg-remote-pause | q2pro/src/client/remote_lerp.c | remote | 60 | * | s/} else i
 neg-remote-cap | q2pro/src/client/remote_lerp.c | remote | 60 | * | s/r->P = fminf(r->P, rec(r, 0)->s.t);/(void)0;/
 
 # moving platform support, classic toss trajectories, and crush overflow logs
-neg-openffa-plat-object | openffa/g_main.c | api3:engine | 60 | t24_plat_object | /if ((ent->groundentity)/,/ClientBeginServerFrame(ent);/s/} else if (FRAMESYNC || ent->groundentity->client ||/} else if (true || ent->groundentity->client ||/
+neg-openffa-plat-object | openffa/g_main.c | api3:engine | 60 | t24_plat_object_linear | s/else if (!ent->grid_move || !mover || FRAMESYNC)/else if (true)/
 neg-openffa-toss-gravity | openffa/g_phys.c | api3:box | 60 | t24_toss_free | /if (toss && remaining == step_frames)/,+1{s/ && remaining == step_frames//;s/ \* TOSS_STEP_TIME;/ * FRAMETIME;/;}
 neg-openffa-crush-count | openffa/g_utils.c | api3:box | 60 | t24_crush_overflow_count | s/++level.crush_overflows/level.crush_overflows/
-neg-opentdm-plat-object | opentdm/g_main.c | api3:engine | 60 | t24_plat_object | /if ((ent->groundentity)/,/ClientBeginServerFrame(ent);/s/} else if (FRAMESYNC || ent->groundentity->client ||/} else if (true || ent->groundentity->client ||/
+neg-opentdm-plat-object | opentdm/g_main.c | api3:engine | 60 | t24_plat_object_linear | s/else if (!ent->grid_move || !mover || FRAMESYNC)/else if (true)/
 neg-opentdm-toss-gravity | opentdm/g_phys.c | api3:box | 60 | t24_toss_free | /if (toss && remaining == step_frames)/,+1{s/ && remaining == step_frames//;s/ \* TOSS_STEP_TIME;/ * FRAMETIME;/;}
 neg-opentdm-crush-count | opentdm/g_utils.c | api3:box | 60 | t24_crush_overflow_count | s/++level.crush_overflows/level.crush_overflows/
 
@@ -152,8 +152,8 @@ neg-empty-new-group | q2pro/src/server/user.c | client | 60 | shot_time_empty_ne
 neg-rejected-backup | q2pro/src/server/user.c | client | 60 | shot_time_rejected_backup | s/= last_executed != lastcmd;/= last_executed != lastcmd \&\& !(sv_client->netchan.dropped > 0 \&\& !numCmds[numDups]);/
 
 # Environment and entity reuse on the classic clock.
-neg-openffa-drown | openffa/p_view.c | api3:box | 60 | t23_drowning | s/+ 1 \* HZ + FRAMEDIV - 1;/+ 1 * HZ;/
-neg-opentdm-drown | opentdm/p_view.c | api3:box | 60 | t23_drowning | s/+ SECS_TO_FRAMES(1) + SECS_TO_FRAMES(0.1f) - 1;/+ SECS_TO_FRAMES(1);/
+neg-openffa-drown | openffa/p_view.c | api3:box | 60 | t23_drowning | s/next_drown_framenum < level.framenum/next_drown_framenum <= level.framenum/
+neg-opentdm-drown | opentdm/p_view.c | api3:box | 60 | t23_drowning | s/next_drown_framenum < level.framenum/next_drown_framenum <= level.framenum/
 neg-openffa-edict-reuse | openffa/g_utils.c | api3:box | 60 | t23_edict_reuse | s/return level\.framenum - ent->freed_framenum > HZ \/ 2;/return level.time - (float)(ent->freed_framenum * FRAMETIME) > 0.5f;/
 
 # Hitscan history and rail traversal.
@@ -167,7 +167,95 @@ neg-opentdm-unlag-shooter-life | opentdm/g_unlag.c | api3:engine | 60 | unlag_li
 neg-opentdm-unlag-high-slot | opentdm/g_unlag.c | api3:engine | 60 | unlag_high_slot | s/i <= game.maxclients; i++)/i <= game.maxclients \&\& i <= 32; i++)/
 
 # Toss support and world impact.
-neg-openffa-toss-wall-toggle | openffa/g_main.c | api3:engine | 60 | t24_toss_wall_toggle | s/ent->groundentity->solid == SOLID_NOT) {/false) {/
+neg-openffa-toss-wall-toggle | openffa/g_main.c | api3:engine | 60 | t24_toss_wall_toggle | s/if (ground && ground->linkcount != ent->groundentity_linkcount)/if (ground \&\& ground->solid != SOLID_NOT \&\& ground->linkcount != ent->groundentity_linkcount)/
 neg-openffa-toss-world-face | openffa/g_phys.c | api3:engine | 60 | t24_toss_outer_corner | s/else if (ent->toss_world_steps)/else if (0)/
-neg-opentdm-toss-wall-toggle | opentdm/g_main.c | api3:engine | 60 | t24_toss_wall_toggle | s/ent->groundentity->solid == SOLID_NOT) {/false) {/
+neg-opentdm-toss-wall-toggle | opentdm/g_main.c | api3:engine | 60 | t24_toss_wall_toggle | s/if (ground && ground->linkcount != ent->groundentity_linkcount)/if (ground \&\& ground->solid != SOLID_NOT \&\& ground->linkcount != ent->groundentity_linkcount)/
 neg-opentdm-toss-world-face | opentdm/g_phys.c | api3:engine | 60 | t24_toss_outer_corner | s/else if (ent->toss_world_steps)/else if (0)/
+
+# Grid clocks, weapon windows, projectile motion, snapshot presentation and match deadlines.
+neg-openffa-support | openffa/g_main.c | api3:box | 60 | t24_plat_object_linear | s/toss \&\& mover \&\& !ent->grid_move))/toss \&\& mover \&\& !ent->grid_move \&\& FRAMESYNC))/; s/!ent->grid_move || !mover || FRAMESYNC/!mover || FRAMESYNC/
+neg-openffa-supportgrid | openffa/g_main.c | api3:box | 60 | t24_plat_object_linear | s/toss \&\& mover \&\& !ent->grid_move))/toss \&\& mover))/
+neg-openffa-gridframes | openffa/g_utils.c | api3:box | 60 | grid_durations | s/(int)(seconds \* \(10\|BASE_FRAMERATE\))/(int)(seconds * \1 + 0.5f)/ | assertion:whole windows:
+neg-openffa-windowclock | openffa/p_weapon.c | api3:box | 60 | w_timing_window | /^void Think_Weapon/,/^}/s/level.framenum = G_WindowFrame(framenum);/level.framenum = framenum;/ | assertion:rocket sees quad expire at the window frame
+neg-openffa-windowclock-fuse | openffa/p_weapon.c | api3:box | 60 | w_special_windowclock | /^void Think_Weapon/,/^}/s/level.framenum = G_WindowFrame(framenum);/level.framenum = framenum;/ | assertion:hand grenade fuse arms from the window frame
+neg-openffa-plat-fuse | openffa/g_phys.c | api3:box | 60 | t24_plat_fuse | s/if (\(thinktime\|thinkframe\) > level.framenum)/if (\1 > level.framenum || (ent->grid_move \&\& \1 == level.framenum))/ | assertion:riding grenade explodes at its grid deadline
+neg-openffa-mapblaster | openffa/g_weapon.c | api3:box | 60 | t24_grid_mapblaster | /^void fire_blaster/,/^}/s/^    G_GridProjectile(bolt);/    if (strcmp(self->classname, "target_blaster")) G_GridProjectile(bolt);/
+neg-openffa-gridfree | openffa/g_utils.c | api3:box | 60 | t24_grid_mapblaster | /^void G_FreeEdict/,/^}/s/^    memset(ed, 0, sizeof(\*ed));/    bool grid_move = ed->grid_move; memset(ed, 0, sizeof(*ed)); ed->grid_move = grid_move;/
+neg-openffa-respawn | openffa/p_client.c | api3:box | 60 | match_respawn_deadline | s/respawn_framenum = G_WindowFrame(level\.framenum)/respawn_framenum = level.framenum/ | assertion:respawn deadline from the death window
+neg-openffa-killrule | openffa/g_cmds.c | api3:box | 60 | match_kill_grid | s/G_WindowFrame(level\.framenum) - ent->client->respawn_framenum/level.framenum - ent->client->respawn_framenum/ | assertion:kill allowed in the fifth second's grid window
+neg-openffa-mega | openffa/g_items.c | api3:box | 60 | t23_item_respawn | /ent->think = MegaHealth_think/,+1s/G_WindowFrame(level.framenum)/level.framenum/ | assertion:mega health holds for five seconds
+neg-openffa-pickupmsg | openffa/g_items.c | api3:box | 60 | t23_item_hud | /pickup_\(msg_\)\{0,1\}framenum = /s/G_WindowFrame(level.framenum)/level.framenum/ | assertion:pickup HUD persists through three seconds
+neg-openffa-dropitem | openffa/g_items.c | api3:box | 60 | t23_dropped_items | /dropped->nextthink = /s/G_WindowFrame(level.framenum)/level.framenum/ | assertion:owner blocked before pickup opens
+neg-openffa-hurtgrid | openffa/g_trigger.c | api3:box | 60 | t11_hurt_normal | /^\(static \)\{0,1\}void hurt_touch/,/^}/s/G_WindowFrame(level.framenum)/level.framenum/ | assertion:first contact in window hits
+neg-openffa-jumppad | openffa/g_trigger.c | api3:box | 60 | t23_push_sound | /void trigger_push_touch/,/^}/s/G_WindowFrame(level.framenum)/level.framenum/ | assertion:jump pad is silent in window 15
+neg-openffa-world-drown | openffa/p_view.c | api3:box | 60 | t23_drowning | /^\(static \)\{0,1\}void P_WorldEffects/,/^}/{/if (!FRAMESYNC)/,+1d;} | assertion:drown hit 2 after
+neg-openffa-force-respawn-grid | openffa/p_client.c | api3:box | 60 | t23_respawn | s/if (FRAMESYNC \&\& ent->deadflag)/if (ent->deadflag)/ | assertion:forced respawn waits for the first eligible grid frame
+neg-openffa-pu-invuln | openffa/g_items.c | api3:box | 60 | t23_powerup_lifetime | /invincible_framenum = /s/G_WindowFrame(level.framenum)/level.framenum/ | assertion:invulnerability starts with 30 s and its icon
+neg-openffa-pu-breather | openffa/g_items.c | api3:box | 60 | t23_powerup_lifetime | /breather_framenum = /s/G_WindowFrame(level.framenum)/level.framenum/ | assertion:rebreather starts with 30 s and its icon
+neg-openffa-pu-enviro | openffa/g_items.c | api3:box | 60 | t23_powerup_lifetime | /enviro_framenum = /s/G_WindowFrame(level.framenum)/level.framenum/ | assertion:environment suit starts with 30 s and its icon
+neg-openffa-display | openffa/g_main.c | grid-display | 60 | grid_display | s/int d = framediv_api->ClientFrameDiv(receiver);/int d = framediv_api->ClientFrameDiv(receiver); if (d > 0 \&\& d < div) d = 1;/ | assertion:decoded motion d=2
+neg-openffa-angles | openffa/g_main.c | grid-display | 60 | grid_display_angles | s/temp->s.angles\[i\] = ent->grid_from_angles\[i\] + da \* f1;/temp->s.angles[i] = ent->s.angles[i];/ | assertion:decoded angle arc
+neg-openffa-gridpush | openffa/g_phys.c | grid-display | 60 | grid_display_push | s/VectorAdd(check->grid_from, displacement, check->grid_from);/(void)displacement;/ | assertion:decoded translated projectile:
+neg-openffa-gridrotate | openffa/g_phys.c | grid-display | 60 | grid_display_rotate | s/VectorSubtract(check->s.origin, pushed_p\[-1\].origin, displacement);/VectorCopy(move, displacement);/ | assertion:decoded rotated projectile:
+neg-openffa-gridundo | openffa/g_phys.c | grid-display | 60 | grid_display_undo | s/VectorCopy(p->grid_from, p->ent->grid_from);/(void)0;/ | assertion:decoded rolled back projectile:
+neg-openffa-projectile-step | openffa/g_phys.c | api3:box | 60 | t24_grid_mapblaster | /^void G_RunEntity/,/^}/s/if (!FRAMESYNC)/if (0)/ | assertion:map bolt
+neg-opentdm-support | opentdm/g_main.c | api3:box | 60 | t24_plat_object_linear | s/toss \&\& mover \&\& !ent->grid_move))/toss \&\& mover \&\& !ent->grid_move \&\& FRAMESYNC))/; s/!ent->grid_move || !mover || FRAMESYNC/!mover || FRAMESYNC/
+neg-opentdm-supportgrid | opentdm/g_main.c | api3:box | 60 | t24_plat_object_linear | s/toss \&\& mover \&\& !ent->grid_move))/toss \&\& mover))/
+neg-opentdm-gridframes | opentdm/g_utils.c | api3:box | 60 | grid_durations | s/(int)(seconds \* \(10\|BASE_FRAMERATE\))/(int)(seconds * \1 + 0.5f)/ | assertion:whole windows:
+neg-opentdm-windowclock | opentdm/p_weapon.c | api3:box | 60 | w_timing_window | /^void Think_Weapon/,/^}/s/level.framenum = G_WindowFrame(framenum);/level.framenum = framenum;/ | assertion:rocket sees quad expire at the window frame
+neg-opentdm-windowclock-fuse | opentdm/p_weapon.c | api3:box | 60 | w_special_windowclock | /^void Think_Weapon/,/^}/s/level.framenum = G_WindowFrame(framenum);/level.framenum = framenum;/ | assertion:hand grenade fuse arms from the window frame
+neg-opentdm-plat-fuse | opentdm/g_phys.c | api3:box | 60 | t24_plat_fuse | s/if (\(thinktime\|thinkframe\) > level.framenum)/if (\1 > level.framenum || (ent->grid_move \&\& \1 == level.framenum))/ | assertion:riding grenade explodes at its grid deadline
+neg-opentdm-mapblaster | opentdm/g_weapon.c | api3:box | 60 | t24_grid_mapblaster | /^void fire_blaster/,/^}/s/^    G_GridProjectile(bolt);/    if (strcmp(self->classname, "target_blaster")) G_GridProjectile(bolt);/
+neg-opentdm-gridfree | opentdm/g_utils.c | api3:box | 60 | t24_grid_mapblaster | /^void G_FreeEdict/,/^}/s/^    memset(ed, 0, sizeof(\*ed));/    bool grid_move = ed->grid_move; memset(ed, 0, sizeof(*ed)); ed->grid_move = grid_move;/
+neg-opentdm-respawn | opentdm/p_client.c | api3:box | 60 | match_respawn_deadline | s/respawn_framenum = G_WindowFrame(level\.framenum)/respawn_framenum = level.framenum/ | assertion:respawn deadline from the death window
+neg-opentdm-killrule | opentdm/g_cmds.c | api3:box | 60 | match_kill_grid | s/G_WindowFrame(level\.framenum) - ent->client->respawn_framenum/level.framenum - ent->client->respawn_framenum/ | assertion:kill allowed in the fifth second's grid window
+neg-opentdm-mega | opentdm/g_items.c | api3:box | 60 | t23_item_respawn | /ent->think = MegaHealth_think/,+1s/G_WindowFrame(level.framenum)/level.framenum/ | assertion:mega health holds for five seconds
+neg-opentdm-pickupmsg | opentdm/g_items.c | api3:box | 60 | t23_item_hud | /pickup_\(msg_\)\{0,1\}framenum = /s/G_WindowFrame(level.framenum)/level.framenum/ | assertion:pickup HUD persists through three seconds
+neg-opentdm-dropitem | opentdm/g_items.c | api3:box | 60 | t23_dropped_items | /dropped->nextthink = /s/G_WindowFrame(level.framenum)/level.framenum/ | assertion:owner blocked before pickup opens
+neg-opentdm-hurtgrid | opentdm/g_trigger.c | api3:box | 60 | t11_hurt_normal | /^\(static \)\{0,1\}void hurt_touch/,/^}/s/G_WindowFrame(level.framenum)/level.framenum/ | assertion:first contact in window hits
+neg-opentdm-jumppad | opentdm/g_trigger.c | api3:box | 60 | t23_push_sound | /void trigger_push_touch/,/^}/s/G_WindowFrame(level.framenum)/level.framenum/ | assertion:jump pad is silent in window 15
+neg-opentdm-world-drown | opentdm/p_view.c | api3:box | 60 | t23_drowning | /^\(static \)\{0,1\}void P_WorldEffects/,/^}/{/if (!FRAMESYNC)/,+1d;} | assertion:drown hit 2 after
+neg-opentdm-force-respawn-grid | opentdm/p_client.c | api3:box | 60 | t23_respawn | s/if (tdm_match_status == MM_SCOREBOARD || !FRAMESYNC)/if (tdm_match_status == MM_SCOREBOARD)/ | assertion:forced respawn waits for the first eligible grid frame
+neg-opentdm-pu-invuln | opentdm/g_items.c | api3:box | 60 | t23_powerup_lifetime | /invincible_framenum = /s/G_WindowFrame(level.framenum)/level.framenum/ | assertion:invulnerability starts with 30 s and its icon
+neg-opentdm-pu-breather | opentdm/g_items.c | api3:box | 60 | t23_powerup_lifetime | /breather_framenum = /s/G_WindowFrame(level.framenum)/level.framenum/ | assertion:rebreather starts with 30 s and its icon
+neg-opentdm-pu-enviro | opentdm/g_items.c | api3:box | 60 | t23_powerup_lifetime | /enviro_framenum = /s/G_WindowFrame(level.framenum)/level.framenum/ | assertion:environment suit starts with 30 s and its icon
+neg-opentdm-display | opentdm/g_main.c | grid-display | 60 | grid_display | s/int d = framediv_api->ClientFrameDiv(receiver);/int d = framediv_api->ClientFrameDiv(receiver); if (d > 0 \&\& d < div) d = 1;/ | assertion:decoded motion d=2
+neg-opentdm-angles | opentdm/g_main.c | grid-display | 60 | grid_display_angles | s/temp->s.angles\[i\] = ent->grid_from_angles\[i\] + da \* f1;/temp->s.angles[i] = ent->s.angles[i];/ | assertion:decoded angle arc
+neg-opentdm-gridpush | opentdm/g_phys.c | grid-display | 60 | grid_display_push | s/VectorAdd(check->grid_from, displacement, check->grid_from);/(void)displacement;/ | assertion:decoded translated projectile:
+neg-opentdm-gridrotate | opentdm/g_phys.c | grid-display | 60 | grid_display_rotate | s/VectorSubtract(check->s.origin, pushed_p\[-1\].origin, displacement);/VectorCopy(move, displacement);/ | assertion:decoded rotated projectile:
+neg-opentdm-gridundo | opentdm/g_phys.c | grid-display | 60 | grid_display_undo | s/VectorCopy(p->grid_from, p->ent->grid_from);/(void)0;/ | assertion:decoded rolled back projectile:
+neg-opentdm-projectile-step | opentdm/g_phys.c | api3:box | 60 | t24_grid_mapblaster | /^void G_RunEntity/,/^}/s/if (!FRAMESYNC)/if (0)/ | assertion:map bolt
+neg-exitlevel | opentdm/g_main.c | api3:box | 60 | grid_exit_missing | /ExitLevel();/ { n; n; s/SECS_TO_FRAMES(0.1f) > 1/0/; } | assertion:phase after gamemap:
+neg-resetclock | openffa/g_spawn.c | api3:box | 60 | grid_reset_command | s/level\.time = level\.framenum \* FRAMETIME;/level.time = 2 * FRAMETIME;/ | assertion:reset level.time:
+neg-reset-map-phase | openffa/g_spawn.c | api3:box | 60 | grid_reset_map | 0,/^    level\.grid_frame_offset = phase;$/s//    level.grid_frame_offset = 0;/ | assertion:map timer event 1
+neg-reset-slow-sound | openffa/g_trigger.c | api3:box | 60 | grid_reset_slow | s/window % HZ == G_WindowFrame(HZ) - HZ/window % HZ == 0/ | assertion:SLOW after reset sounds only in whole-second windows
+neg-freeze | opentdm/g_main.c | api3:box | 60 | match_timeout_grid | s/!level\.timeout_frozen \&\& FRAMESYNC/!level.timeout_frozen/ | assertion:world and match clock advance until the first grid frame
+neg-freeze-resume | opentdm/g_tdm_core.c | api3:box | 60 | match_timeout_grid | s/G_WindowFrame(level\.realframenum) + SECS_TO_FRAMES(10\.4f)/level.realframenum + SECS_TO_FRAMES(10.4f)/; s/remaining <= 0 \&\& FRAMESYNC/remaining == 0/ | assertion:resume countdown is scheduled from the grid
+neg-freezethink | opentdm/g_phys.c | api3:box | 60 | match_timeout_think_grid | /^void G_FreezeFrame/,/^}/s/nextthink += div;/nextthink += 0;/ | assertion:frozen ordinary think waits for the next grid frame
+neg-freezetoss | opentdm/g_phys.c | api3:box | 60 | match_timeout_toss | s/toss_resume_hold = div - 1;/toss_resume_hold = 0;/ | assertion:flight waits for every remaining world frame after resume
+neg-tossslot | opentdm/p_client.c | api3:box | 60 | match_timeout_body_slot | /^    body->toss_resume_hold = 0;$/d | assertion:reused body slot moves on its first world frame
+neg-timeoutflag | opentdm/g_tdm_cmds.c | api3:box | 60 | match_timeout_reentry | /^        level\.timeout_frozen = false;$/d | assertion:pause 1 freezes and defers its own grid frame
+neg-winresume | opentdm/g_tdm_cmds.c | api3:box | 60 | match_timeout_win_grid | s/G_WindowFrame(level\.realframenum) + SECS_TO_FRAMES(0\.1f)/level.realframenum + 1/ | assertion:win schedules one grid interval
+neg-opentdm-matchstart | opentdm/g_tdm_core.c | api3:box | 60 | match_countdown_grid | s/match_start_framenum = G_WindowFrame(level\.framenum)/match_start_framenum = level.framenum/ | assertion:countdown deadline is 150 grid windows
+neg-openffa-matchstart | openffa/g_main.c | api3:box | 60 | grid_reset_countdown | s/countdown_framenum = G_WindowFrame(level\.framenum)/countdown_framenum = level.framenum/ | assertion:countdown starts timing from the grid frame
+neg-countdowngrid | opentdm/g_tdm_core.c | api3:box | 60 | match_countdown_grid | s/G_GridFrames(g_match_countdown->value)/SECS_TO_FRAMES(g_match_countdown->value)/ | assertion:countdown deadline is 22 grid windows
+neg-opentdm-voteend | opentdm/g_tdm_vote.c | api3:box | 60 | match_vote_end_grid | s/match_end_framenum = window;/match_end_framenum = level.framenum;/ | assertion:vote keeps match active before its grid frame
+neg-openffa-voteend | openffa/g_main.c | api3:box | 60 | match_vote_end_grid | s/FRAMESYNC \&\& level\.time >= timelimit/level.time >= timelimit/ | assertion:vote keeps match active before its grid frame
+neg-otvote | opentdm/g_tdm_vote.c | api3:box | 60 | match_overtime_vote_grid | s/match_end_framenum > window/match_end_framenum > level.framenum/ | assertion:extension announcement matches the vote
+neg-resetphase-command | openffa/g_spawn.c | api3:box | 60 | grid_reset_command | s/level\.grid_frame_offset = phase;/level.grid_frame_offset = 0;/ | assertion:after reset: world=
+neg-resetphase-countdown | openffa/g_spawn.c | api3:box | 60 | grid_reset_countdown | s/level\.grid_frame_offset = phase;/level.grid_frame_offset = 0;/ | assertion:after reset: world=
+neg-resetphase-missing | openffa/g_spawn.c | api3:box | 60 | grid_reset_missing | s/level\.grid_frame_offset = phase;/level.grid_frame_offset = 0;/ | assertion:after reset: world=
+neg-resetphase-same | openffa/g_spawn.c | api3:box | 60 | grid_reset_same | s/level\.grid_frame_offset = phase;/level.grid_frame_offset = 0;/ | assertion:after reset: world=
+neg-moverresume-10 | opentdm/g_tdm_core.c | api3:engine | 10 | timeout_door_linear | /^            G_ResumeMoverThinks();$/d | assertion:timeout endpoint equals control
+neg-moverresume | opentdm/g_tdm_core.c | api3:engine | 60 | timeout_door_linear | /^            G_ResumeMoverThinks();$/d | assertion:timeout endpoint equals control
+neg-opentdm-displaytimeout | opentdm/g_main.c | grid-display | 60 | grid_display_timeout | s/int j = level.realframenum - 1 - ent->grid_frame;/int j = level.framenum - 1 - ent->grid_frame;/ | assertion:decoded timeout motion:
+neg-recvdiv | q2pro/src/server/entities.c | grid-client | 60 | framediv_receiver | s/customize(clent, ent, \&temp)/customize(EDICT_NUM(frame->clientNum + 1), ent, \&temp)/ | assertion:receiver divisor slot 3 (pov 0): got 1, want 6
+neg-tempx | q2pro/src/server/entities.c | grid-client | 60 | framediv_snapshot | /^            memset(\&temp.x, 0, sizeof(temp.x));$/d | assertion:zero customized extension after seeded entity
+neg-oldorigin | q2pro/src/server/entities.c | grid-client | 60 | framediv_snapshot | s/ && !(customized && sv_game_requested_framediv)// | assertion:custom old_origin at first appearance
+neg-extgate | q2pro/src/server/entities.c | grid-client | 60 | framediv_legacy | s/ && sv_game_requested_framediv// | assertion:legacy packet callback 1 div 2 matches the reference packet
+neg-tempx-legacy | q2pro/src/server/entities.c | grid-client | 60 | framediv_legacy | s/^            memset(\&temp.x, 0, sizeof(temp.x));$/            if (sv_game_requested_framediv)\n    &/ | assertion:zero customized extension without a request
+neg-openffa-quad-expiry | openffa/g_items.c | api3:box | 10 | item_grid_dropped_quad_expiry | /Use_QuadFor(other, ent->item,/s/ent->nextthink - G_WindowFrame(level.framenum)/1 + ent->nextthink - G_WindowFrame(level.framenum)/ | assertion:quad
+neg-openffa-short-timer | openffa/g_func.c | api3:box | 60 | item_grid_short_timer | s/func_timer_fire(self, G_GridFrames(0.1f));/func_timer_fire(self, 0);/ | assertion:short timer
+neg-opentdm-quad-expiry | opentdm/g_items.c | api3:box | 10 | item_grid_dropped_quad_expiry | /Use_QuadFor(other, ent->item,/s/ent->nextthink - G_WindowFrame(level.framenum)/1 + ent->nextthink - G_WindowFrame(level.framenum)/ | assertion:quad
+neg-opentdm-short-timer | opentdm/g_func.c | api3:box | 60 | item_grid_short_timer | s/func_timer_fire(self, G_GridFrames(0.1f));/func_timer_fire(self, 0);/ | assertion:short timer
+neg-opentdm-fall-grid | opentdm/p_view.c | api3:box | 60 | t18_fall_pain | /if (FRAMESYNC) {/{N; /P_FallingDamage(ent);/s/if (FRAMESYNC)/if (true)/; P; D;} | assertion:fall sound is on the grid

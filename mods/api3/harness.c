@@ -70,10 +70,12 @@ static int h_frames;            /* RunFrame calls so far */
 #ifdef HARNESS_ENGINE
 static int h_unlag_fixture;
 static int h_maxclients = 4;
+#ifndef HARNESS_IMPORT
 static bool h_unlag_initialized;
 static edict_t *h_unlag_command_ent;
 static unlag_command_t h_unlag_command;
 static int h_unlag_clips;
+#endif
 static int h_unlag_trace_budget;
 static short h_unlag_yaw;
 static char h_unlag_log[256];
@@ -199,6 +201,7 @@ static void h_log_text(hprint_t *log, int *n, int cap, int num, const char *text
     e->num = num;
     snprintf(e->text, sizeof(e->text), "%s", text ? text : "");
 }
+
 
 static void imp_bprintf(int level, const char *fmt, ...)
 {
@@ -337,8 +340,10 @@ void he_link(edict_t *ent);
 void he_unlink(edict_t *ent);
 void he_pmove(void *pm);
 uint32_t he_multicast(const vec3_t origin, multicast_t mode, const byte *data, size_t len, int maxclients);
+#ifndef HARNESS_IMPORT
 trace_t q_gameabi he_clip(const vec3_t start, const vec3_t mins, const vec3_t maxs,
                         const vec3_t end, edict_t *ent, int mask);
+#endif
 #endif
 
 static void imp_linkentity(edict_t *ent)
@@ -621,14 +626,21 @@ static h_multicast_t h_multicasts[8192];
 static int h_nmulticasts;
 #endif
 
-static void h_w(int c) { if (h_wlen < (int)sizeof(h_wbuf)) h_wbuf[h_wlen++] = (byte)c; }
+static void h_w(int c)
+{
+    if (h_wlen < (int)sizeof(h_wbuf))
+        h_wbuf[h_wlen++] = (byte)c;
+}
 static void imp_WriteChar(int c) { h_w(c); }
 static void imp_WriteByte(int c) { h_w(c); }
 static void imp_WriteShort(int c) { h_w(c & 255); h_w((c >> 8) & 255); }
 static void imp_WriteLong(int c) { imp_WriteShort(c & 0xffff); imp_WriteShort((c >> 16) & 0xffff); }
 static void imp_WriteFloat(float f) { union { float f; int i; } u; u.f = f; imp_WriteLong(u.i); }
 static void imp_WriteString(const char *s) { while (s && *s) h_w(*s++); h_w(0); }
-static void imp_WritePosition(const vec3_t p) { for (int i = 0; i < 3; i++) imp_WriteShort((int)(p[i] * 8)); }
+static void imp_WritePosition(const vec3_t p)
+{
+    for (int i = 0; i < 3; i++) imp_WriteShort((int)(p[i] * 8));
+}
 static void imp_WriteDir(const vec3_t p) { (void)p; h_w(0); }
 static void imp_WriteAngle(float f) { h_w((int)(f * 256 / 360) & 255); }
 
@@ -769,7 +781,7 @@ static game_import_t h_imports = {
 
 game_export_t *GetGameAPI(game_import_t *import);
 
-#ifdef HARNESS_ENGINE
+#if defined(HARNESS_ENGINE)
 const game_export_ex_t *GetGameAPIEx(const game_import_ex_t *import);
 
 static int h_unlag_world(void) { return h_frames; }
@@ -801,6 +813,19 @@ static const game_import_ex_t h_imports_ex = {
 };
 #endif
 
+static void h_shutdown(void)
+{
+    ge->Shutdown();
+#ifdef HARNESS_OPENTDM
+    // The linked fixture retains globals that normally disappear on unload.
+    memset(&level, 0, sizeof(level));
+    memset(teaminfo, 0, sizeof(teaminfo));
+    memset(&current_matchinfo, 0, sizeof(current_matchinfo));
+    memset(&old_matchinfo, 0, sizeof(old_matchinfo));
+    memset(&vote, 0, sizeof(vote));
+#endif
+}
+
 static void h_start(const char *entities)
 {
     char rate[16];
@@ -827,12 +852,12 @@ static void h_start(const char *entities)
 #endif
     ge = GetGameAPI(&h_imports);
     if (ge->apiversion != 3) imp_error("apiversion %d", ge->apiversion);
-#ifdef HARNESS_ENGINE
+#if defined(HARNESS_ENGINE)
     if (h_unlag_fixture)
         GetGameAPIEx(&h_imports_ex);
 #endif
     ge->Init();
-#ifdef HARNESS_ENGINE
+#if defined(HARNESS_ENGINE)
     h_unlag_initialized = true;
 #endif
 #ifdef HARNESS_ENGINE
@@ -891,12 +916,12 @@ static void h_think(edict_t *ent, int buttons, int msec)
     h_cmd_msec += msec;
     if (msec < h_cmd_min) h_cmd_min = msec;
     if (msec > h_cmd_max) h_cmd_max = msec;
-#ifdef HARNESS_ENGINE
+#if defined(HARNESS_ENGINE)
     h_unlag_command_ent = ent;
     cmd.angles[YAW] = h_unlag_yaw;
 #endif
     ge->ClientThink(ent, &cmd);
-#ifdef HARNESS_ENGINE
+#if defined(HARNESS_ENGINE)
     h_unlag_command_ent = NULL;
     h_unlag_command = (unlag_command_t){ 0 };
     h_unlag_yaw = 0;
@@ -1054,12 +1079,16 @@ static int h_listed(const char *name)
     int mover = !strncmp(name, "t13_", 4) || !strncmp(name, "t14_", 4);
     int crush = !strncmp(name, "t12_", 4) && strcmp(name, "t12_rotating_touch");
     if (h_sched != H_SCHED_TICK) return H_ENGINE && mover;     /* the path ticks follow the schedule */
+    if (!strncmp(name, "timeout_", 8)) return H_ENGINE;
     if (!strncmp(name, "t23_", 4)) {
         int engine_only = !strcmp(name, "t23_movers_wait") || !strcmp(name, "t23_viper_pitch");
         return H_ENGINE == engine_only;
     }
     if (!strncmp(name, "t24_", 4)) {
-        if (!strcmp(name, "t24_plat_object") || !strcmp(name, "t24_toss_free") ||
+        if (!strcmp(name, "t24_grid_solid")) return H_ENGINE;
+        if (!strcmp(name, "t24_plat_real_debris")) return H_ENGINE;
+        if (!strcmp(name, "t24_plat_object") || !strcmp(name, "t24_plat_object_linear") ||
+            !strcmp(name, "t24_toss_free") ||
             !strcmp(name, "t24_toss_bounce") || !strcmp(name, "t24_toss_wall_toggle")) return 1;
         int engine_only = !strcmp(name, "t24_toss_drop") || !strcmp(name, "t24_toss_edge") ||
                           !strcmp(name, "t24_toss_outer_corner") ||

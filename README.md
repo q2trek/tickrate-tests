@@ -127,3 +127,18 @@ License
 -------
 
 GPL-2.0, as the code they link. See `LICENSE`.
+
+## 100 ms gameplay grid
+
+The API3 scenarios check projectile motion and visibility, loose objects on
+moving supports, weapon windows and short taps, item and world timers,
+match countdowns and timeouts, respawns, and the grid phase after reset.
+Engine scenarios decode snapshots for the available recipients at 10–60 Hz
+and exercise the dynamic game loader, DM2 and MVD. Grid negative controls
+check named assertion failures where an assertion is specified.
+
+At 10 Hz the scenarios include the hurt-zone sound and the expiring
+dropped quad in both mods, plus OpenTDM's second short tap and linear mover
+resumption after a timeout. The suite does not include the separate comparison
+against archived game builds via `run-parity.py`. Live multiplayer and browser
+rendering are outside these checks.

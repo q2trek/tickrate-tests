@@ -1,5 +1,6 @@
 /* Positions and impact records captured at 10 Hz before changing toss physics.
- * Both mods produced the same values on each collision fixture. Paths end at rest. */
+ * Both mods produced the same values on each collision fixture.
+ * Each projectile sample is after a full grid step; paths end at rest. */
 #ifdef HARNESS_ENGINE
 static const toss_point_t toss_free_reference[] = {
     { 0, 0 }, { 40, 22 }, { 80, 36 }, { 120, 42 }, { 160, 40 }, { 200, 30 },
@@ -538,6 +539,7 @@ static const toss_pad_ref_t toss_pad_reference[] = {
     { 0, { 0, 0 }, { 898.328735f, 0.005137f } },
     { 1, { 446.639862f, 10.016078f }, { 858.564758f, 0.001026f } },
     { 1, { 300, 59 }, { 386.639862f, 15.016078f } },
+    { 1, { 300, 44 }, { 0, 0 } }, // hand grenade enters the pad but gets no impulse
 };
 
 static const float toss_projectile_speed[] = { 1000, 650 };

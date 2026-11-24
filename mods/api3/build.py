@@ -102,7 +102,10 @@ def main():
     ap.add_argument('--replace', action='append', default=[])
     ap.add_argument('--cc', default='cc')
     ap.add_argument('--engine', action='store_true', help='link the engine collision fixture')
+    ap.add_argument('--display', action='store_true', help='build the loadable projectile fixture')
     a = ap.parse_args()
+    if a.display and a.engine:
+        ap.error('--display and --engine are separate harnesses')
     build = Path(a.engine_build).resolve()
     out = Path(a.out).resolve()
     out.mkdir(parents=True, exist_ok=True)
@@ -123,6 +126,11 @@ def main():
     mod_args = ['-DUSE_UNLAG', '-include', str(HERE / 'namespace.h')] + MOD_ARGS[a.mod]
     incs = ['-I' + str(build), '-I' + str(root)]
 
+    define = '-DHARNESS_OPENTDM' if a.mod == 'opentdm' else '-DHARNESS_OPENFFA'
+    if a.display:
+        flags += ['-fPIC', define]
+        sources.append(HERE / 'display.c')
+
     def compile_one(src):
         obj = out / (src.stem + '.o')
         run([a.cc] + flags + mod_args + UB_PIN + incs + ['-iquote', str(root), '-c', str(replace.get(src, src)),
@@ -131,7 +139,10 @@ def main():
 
     with ThreadPoolExecutor() as pool:
         objects = list(pool.map(compile_one, sources))
-    define = '-DHARNESS_OPENTDM' if a.mod == 'opentdm' else '-DHARNESS_OPENFFA'
+    if a.display:
+        run([a.cc, '-shared', '-Wl,-Bsymbolic', '-o', str(out / 'display.so')] + objects + ['-lm'])
+        print(f'built {out / "display.so"} ({a.mod})')
+        return
     engine = ['-DHARNESS_ENGINE'] if a.engine else []
     # API3 const-ness differs between the two mods' headers (same ABI)
     run([a.cc] + flags + mod_args + incs + engine + ['-Wno-incompatible-pointer-types', define,

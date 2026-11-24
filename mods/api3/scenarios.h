@@ -1,5 +1,5 @@
 /*
- * T09-T18 against the mod module. Expected numbers are the
+ * T09-T15 against the production module. Expected numbers are the
  * original 10 Hz contract (weapon frame tables, hurt/crush timestamps),
  * derived in the comments. Scenarios express it in game time (h_rate
  * ticks = 1 s, h_div ticks = one 100 ms weapon step), so they also run at
@@ -20,6 +20,9 @@ static void sc_smoke(void)
     CHECK(p->inuse && h_health(p) == 100, "player spawned with 100 health (got %d)", h_health(p));
 }
 
+/* The usercmd schedules (h_tick_sched): over any second (h_rate ticks)
+ * the commands last 1000 ms, at 60 Hz every tick command 16 or 17 ms; the
+ * world ticks without a ClientThink are the ones the schedule leaves out */
 /* The engine rounds sv_fps down to a multiple of 10 before the game starts
  * (engine/scheduler t01_rate_round); a module that still sees 25 or 0 refuses
  * it instead of running a world clock the engine does not keep */
@@ -56,9 +59,6 @@ static void h_rate_refuse(const char *value)
 static void sc_t01_rate_refuse(void) { h_rate_refuse("25"); }
 static void sc_t01_rate_zero(void) { h_rate_refuse("0"); }
 
-/* The usercmd schedules (h_tick_sched): over any second (h_rate ticks)
- * the commands last 1000 ms, at 60 Hz every tick command 16 or 17 ms; the
- * world ticks without a ClientThink are the ones the schedule leaves out */
 static void sc_t04_cmd_schedule(void)
 {
     h_scene_base();
@@ -110,6 +110,178 @@ static edict_t *h_armed(const char *weapon, const char *ammo, int count)
     h_use(p, weapon);
     return p;
 }
+
+static void sc_w_timing_window(void)
+{
+    edict_t *p = h_armed("rocket launcher", "rockets", 20);
+    while (h_frames % h_div != 1 % h_div)
+        h_frame();
+    p->client->quad_framenum = level.framenum + (h_div - h_frames % h_div) % h_div;
+    int messages = h_nmsgs;
+    h_think(p, BUTTON_ATTACK, 1);
+    h_think(p, 0, 1);
+    CHECK(h_shots(p, MZ_ROCKET, messages) == 1, "first rocket fires in the command");
+    int to_grid = (h_div - h_frames % h_div) % h_div;
+    edict_t *rocket = G_Find(NULL, FOFS(classname), "rocket");
+    CHECK(rocket && rocket->dmg >= 100 && rocket->dmg < 120,
+          "rocket sees quad expire at the window frame");
+    CHECK(rocket && rocket->nextthink == level.framenum + to_grid + 8000 * h_rate / 650,
+          "rocket lifetime starts at the window frame");
+    h_frames_n(to_grid + 1);
+    for (int i = 0; i < 2 * h_div; i++) {
+#ifdef HARNESS_OPENTDM
+        int previous = p->client->ps.gunframe;
+#else
+        int previous = p->client->weaponframe;
+#endif
+        int step = h_frames % h_div == 0;
+        h_frame();
+#ifdef HARNESS_OPENTDM
+        int current = p->client->ps.gunframe;
+#else
+        int current = p->client->weaponframe;
+#endif
+        CHECK(current == previous + step, "automatic reload advances only on the grid, tick %d (frame %d -> %d)",
+              i, previous, current);
+    }
+}
+
+static void sc_w_special_windowclock(void)
+{
+    edict_t *p = h_armed("grenade launcher", "grenades", 20);
+    for (int phase = 0; phase < h_div; phase++) {
+        while (h_frames % h_div != phase)
+            h_frame();
+        int frame = level.framenum;
+        int window = frame + (h_div - phase) % h_div;
+        int messages = h_nmsgs;
+        h_think(p, BUTTON_ATTACK, 1);
+        edict_t *grenade = G_Find(NULL, FOFS(classname), "grenade");
+        CHECK(grenade && h_shots(p, MZ_GRENADE, messages) == 1,
+              "phase %d: grenade and muzzleflash in the command", phase);
+        CHECK(grenade && grenade->nextthink == window + 25 * h_div,
+              "phase %d: fuse deadline starts at the window frame (%d, expected %d)",
+              phase, grenade ? grenade->nextthink : -1, window + 25 * h_div);
+        CHECK(level.framenum == frame, "phase %d: weapon restores the world frame", phase);
+        h_think(p, 0, 1);
+        h_frames_n(3 * h_rate);
+    }
+
+    h_use(p, "grenades");
+    while (h_frames % h_div != 1 % h_div)
+        h_frame();
+    p->client->weaponstate = WEAPON_FIRING;
+#ifdef HARNESS_OPENTDM
+    p->client->ps.gunframe = 11;
+#else
+    p->client->weaponframe = 11;
+#endif
+    int fuse = level.framenum + (h_div - h_frames % h_div) % h_div + 32 * h_div;
+    h_think(p, BUTTON_ATTACK, 1);
+    CHECK(p->client->grenade_framenum == fuse,
+          "hand grenade fuse arms from the window frame (got %d, expected %d)",
+          p->client->grenade_framenum, fuse);
+}
+
+static void sc_w_second_short_tap(void)
+{
+    edict_t *p = h_armed("machinegun", "bullets", 50);
+    for (int pattern = 0; pattern < 3; pattern++) {
+        h_frames_n(h_rate);
+        while (h_frames % h_div != 1 % h_div)
+            h_frame();
+        int messages = h_nmsgs, ammo = h_ammo(p);
+        h_think(p, BUTTON_ATTACK, 1);
+        h_think(p, 0, 1);
+        CHECK(h_shots(p, MZ_MACHINEGUN, messages) == 1, "first tap fires once in the command");
+        int remaining = (h_div - h_frames % h_div) % h_div + 1;
+        if (pattern == 1)
+            h_frames_n(remaining);   /* second tap in the following window */
+        h_think(p, BUTTON_ATTACK, 1);
+        if (pattern != 2)
+            h_think(p, 0, 1);
+        if (pattern != 1) {
+            h_frames_n(remaining);
+            CHECK(h_shots(p, MZ_MACHINEGUN, messages) == 1, "same window: only the first weapon step fired");
+        }
+        h_frames_n(h_div);
+#ifdef HARNESS_OPENTDM
+        int expected = pattern == 0 ? 1 : 2;
+#else
+        int expected = 2;
+#endif
+        CHECK(h_shots(p, MZ_MACHINEGUN, messages) == expected,
+              "pattern %d: the second tap has its verdict at the next weapon step", pattern);
+        h_think(p, 0, 1);
+        h_frames_n(2 * h_div);
+        CHECK(h_shots(p, MZ_MACHINEGUN, messages) == expected && ammo - h_ammo(p) == expected,
+              "%s: expected %d shots and bullets (got %d, %d)",
+              (const char *[]){ "second short tap in the same window", "tap in the adjacent window", "held second tap" }[pattern],
+              expected, h_shots(p, MZ_MACHINEGUN, messages), ammo - h_ammo(p));
+    }
+}
+
+#ifndef HARNESS_OPENTDM
+static void sc_w_second_tap_while_firing(void)
+{
+    edict_t *p = h_armed("machinegun", "bullets", 50);
+    while (h_frames % h_div != 1 % h_div)
+        h_frame();
+    h_think(p, BUTTON_ATTACK, 1);
+    h_think(p, 0, 1);
+    h_frames_n(h_div);
+    CHECK(p->client->weaponstate == WEAPON_FIRING, "machinegun is still in its firing cycle");
+
+    int messages = h_nmsgs;
+    const int *bullets = &p->client->inventory[p->client->ammo_index];
+    int ammo = *bullets;
+    h_think(p, BUTTON_ATTACK, 1);
+    h_think(p, 0, 1);
+    CHECK(h_shots(p, MZ_MACHINEGUN, messages) == 1 && *bullets == ammo - 1,
+          "first tap from WEAPON_FIRING fires once in the command");
+    if (h_div > 1)
+        h_frame();  /* the next tap arrives on another world frame of the same window */
+    h_think(p, BUTTON_ATTACK, 1);
+    h_think(p, 0, 1);
+    while (h_frames % h_div)
+        h_frame();
+    h_frame();
+    CHECK(h_shots(p, MZ_MACHINEGUN, messages) == 1, "one firing step in the input window");
+    h_frames_n(h_div);
+    CHECK(h_shots(p, MZ_MACHINEGUN, messages) == 1 && *bullets == ammo - 1,
+          "released tap after a WEAPON_FIRING shot adds no flash or ammo expenditure on the next step");
+}
+
+static void sc_w_respawn_latch(void)
+{
+    edict_t *p = h_armed("rocket launcher", "rockets", 20);
+    h_frames_n(5 * h_rate);
+    while (h_frames % h_div != 1 % h_div)
+        h_frame();
+    h_think(p, BUTTON_USE, 1);
+    h_think(p, 0, 1);
+    while (h_frames % h_div) {
+        h_frame();
+        CHECK(p->client->latched_buttons & BUTTON_USE, "live button latch survives a non-grid frame");
+    }
+    h_frame();
+    CHECK(!p->client->latched_buttons, "live button latch clears on the grid frame");
+
+    h_client_command(p, "kill");
+    CHECK(p->deadflag, "player is dead before the respawn input");
+    do {
+        h_frame();
+    } while (level.framenum <= p->client->respawn_framenum || h_frames % h_div != 1 % h_div);
+    h_think(p, BUTTON_ATTACK, 1);
+    h_think(p, 0, 1);
+    while (h_frames % h_div) {
+        h_frame();
+        CHECK(p->deadflag, "respawn from a released tap waits for the grid frame");
+    }
+    h_frame();
+    CHECK(!p->deadflag && p->health > 0, "latched attack respawns on the grid frame");
+}
+#endif
 
 /* hold attack for `ticks` world ticks (one usercmd per tick), then release
  * and let the weapon settle; returns shots, *used = ammo spent */
@@ -236,18 +408,15 @@ static void h_second_tap(const char *weapon, const char *ammo, int mz, int last)
               weapon, j, h_div, after_a, shots, used);
     }
 }
-/* Two taps in one delivered batch: press, release, press, release (four
- * usercmds of 20 ms, as the enhanced parser hands a packet's commands to
- * ClientThink with no RunFrame between them), then nothing; in every phase
- * of the 100 ms weapon step. When the first press fires inside the batch
- * (every phase at 10 Hz, every phase in OpenFFA), the second is kept for
- * the next weapon step: 2 shots, 2 ammo. When both presses come before a
- * weapon step (OpenTDM between its steps), they are one pending request:
- * one shot or two (info line), never more. */
+/* Deliver both taps in one packet before RunFrame at every phase. */
 static void h_batch_taps(const char *weapon, const char *ammo, int mz)
 {
     edict_t *p = h_armed(weapon, ammo, 50);
-    int strict = 0;
+#ifdef HARNESS_OPENTDM
+    int expected = 1;   /* the second press is released before the next step */
+#else
+    int expected = 2;   /* the second press is pending */
+#endif
     for (int k = 0; k < h_div; k++) {
         h_phase(p, k);
         int m = h_nmsgs, a = h_ammo(p);
@@ -260,16 +429,10 @@ static void h_batch_taps(const char *weapon, const char *ammo, int mz)
         for (int i = 0; i < 2 * h_rate; i++) h_tick(p, 0, 1);
         int shots = h_shots(p, mz, m), used = a - h_ammo(p);
         printf("  info %s batch taps phase %d/%d: %d in the batch, %d shots, %d ammo\n", weapon, k, h_div, inpack, shots, used);
-        if (inpack) {
-            strict++;
-            CHECK(shots == 2 && used == 2, "%s phase %d/%d: first press fired in the batch, the second is the next shot (got %d shots, %d ammo)",
-                  weapon, k, h_div, shots, used);
-        } else {
-            CHECK(shots >= 1 && shots <= 2 && used == shots, "%s phase %d/%d: both presses before a weapon step, 1 or 2 shots, ammo per shot (got %d, %d)",
-                  weapon, k, h_div, shots, used);
-        }
+        CHECK(inpack == 1 && shots == expected && used == expected,
+              "%s phase %d/%d: one shot in the batch, %d total shots and ammo (got %d, %d, %d)",
+              weapon, k, h_div, expected, inpack, shots, used);
     }
-    CHECK(strict > 0, "%s: the first press fired inside the batch in some phase (%d of %d)", weapon, strict, h_div);
 }
 static void sc_t09_machinegun_batch_taps(void) { h_batch_taps("machinegun", "bullets", MZ_MACHINEGUN); }
 static void sc_t09_hyperblaster_batch_taps(void) { h_batch_taps("hyperblaster", "cells", MZ_HYPERBLASTER); }
@@ -303,6 +466,20 @@ static void h_tap_spam(const char *weapon, const char *ammo, int mz, int secs, i
 static void sc_t09_rocket_tap_spam(void) { h_tap_spam("rocket launcher", "rockets", MZ_ROCKET, 2, 3); }
 static void sc_t09_machinegun_tap_spam(void) { h_tap_spam("machinegun", "bullets", MZ_MACHINEGUN, 1, 10); }
 
+/* Machinegun sub-frame tap: the known defect (live buttons are read at the
+ * world frame) is recorded, not asserted. */
+static void sc_t09_machinegun_tap_observed(void)
+{
+    edict_t *p = h_armed("machinegun", "bullets", 50);
+    int m = h_nmsgs, a = h_ammo(p);
+    h_think(p, BUTTON_ATTACK, 500 / h_rate);
+    h_think(p, 0, 500 / h_rate);
+    h_frame();
+    for (int i = 0; i < h_rate; i++) h_tick(p, 0, 1);
+    printf("  info machinegun sub-frame tap: %d shots, %d bullets (observed, not asserted)\n",
+           h_shots(p, MZ_MACHINEGUN, m), a - h_ammo(p));
+}
+
 /* One rocket, attack held 1 s: one shot, then the no-ammo click and the
  * automatic switch away; no further rocket. */
 static void sc_t09_rocket_noammo(void)
@@ -318,7 +495,7 @@ static void sc_t09_rocket_noammo(void)
     CHECK(h_shots(p, MZ_ROCKET, m) == 0, "empty: no rocket (got %d)", h_shots(p, MZ_ROCKET, m));
 }
 
-/* Pending press losing its context. A press that the weapon has not
+/* Pending press losing its context (6.3). A press that the weapon has not
  * processed yet at 60 Hz, then a context change in the same world tick
  * (before RunFrame), then control comes back: the old press fires nothing
  * afterwards. At 10 Hz the same press is processed at once, before the
@@ -453,10 +630,13 @@ static void h_lifecycle(int ev)
         h_client_command(p, "time");
         h_frame();
         CHECK(tdm_match_status == MM_TIMEOUT, "timeout (status %d)", tdm_match_status);
+        h_think(p, BUTTON_ATTACK, 10);
+        h_think(p, 0, 10);
         h_frames_n(h_rate);
         h_client_command(p, "time");
         for (int i = 0; i < 15 * h_rate && tdm_match_status == MM_TIMEOUT; i++) h_frame();
         CHECK(tdm_match_status == MM_PLAYING, "resumed (status %d)", tdm_match_status);
+        h_frames_n(h_rate);   /* no new command clears stale input before resumed weapon steps */
         break;
 #endif
     default:    /* none, no-ammo: the weapon step itself */
@@ -577,6 +757,17 @@ static int h_explosions(int from)
     return c;
 }
 
+/* The game uses the coming world frame while it runs the entity loop. */
+static int h_grid_wait(void)
+{
+#ifdef HARNESS_OPENTDM
+    int frame = level.realframenum;
+#else
+    int frame = h_frames;
+#endif
+    return (h_div - frame % h_div) % h_div;
+}
+
 /* a thrown hand grenade: entity state with the grenade model and effect */
 static edict_t *h_grenade(void)
 {
@@ -643,14 +834,15 @@ static void sc_t10_grenade_release_1s(void)
     for (int i = 0; i < 5 * h_div && !g; i++) { h_tick(p, 0, 1); g = h_grenade(); if (g) thrown = h_frames - 1; }
     CHECK(g != NULL, "grenade thrown");
     if (!g) return;
+    int window = thrown + (h_grid_wait() + 1) % h_div;
     CHECK(thrown - arm == 22 * h_div, "thrown 2.2 s (%d frames) after arming, 1 s remaining (got %d)", 22 * h_div, thrown - arm);
     float x0 = g->s.origin[0];
-    h_frame();
-    float speed = (g->s.origin[0] - x0) * h_rate;
+    h_frames_n(h_grid_wait() + 1);
+    float speed = (g->s.origin[0] - x0) * 10;
     CHECK(fabsf(speed - H_GRENADE_SPEED_1S) <= 1, "forward speed %.2f = %d +- 1", speed, H_GRENADE_SPEED_1S);
     int boom = -1, m = h_nmsgs;
     for (int i = 0; i < 3 * h_rate && boom < 0; i++) { h_frame(); if (h_explosions(m)) boom = h_frames - 1; }
-    CHECK(boom - thrown == h_rate, "flying grenade explodes after the remaining 1 s: %d frames (got %d)", h_rate, boom - thrown);
+    CHECK(boom - window == h_rate, "flying grenade explodes after the remaining 1 s: %d frames (got %d)", h_rate, boom - window);
     CHECK(a - h_ammo(p) == 1, "one grenade spent (got %d)", a - h_ammo(p));
 }
 
@@ -669,20 +861,21 @@ static void sc_t10_grenade_quick(void)
     for (int i = 0; i < 3 * h_rate && !g; i++) { h_tick(p, 0, 1); g = h_grenade(); if (g) thrown = h_frames - 1; }
     CHECK(g != NULL, "grenade thrown");
     if (!g) return;
+    int window = thrown + (h_grid_wait() + 1) % h_div;
     h_tick(p, BUTTON_ATTACK, 1);
     float x0 = g->s.origin[0];
-    h_frame();
-    float speed = (g->s.origin[0] - x0) * h_rate;
+    h_frames_n(h_grid_wait() + 1);
+    float speed = (g->s.origin[0] - x0) * 10;
     CHECK(fabsf(speed - H_GRENADE_SPEED_QUICK) <= 1, "quick release speed %.2f = %d +- 1", speed, H_GRENADE_SPEED_QUICK);
     int boom = -1;
     for (int i = 0; i < 5 * h_rate && boom < 0; i++) { h_tick(p, 0, 1); if (h_explosions(m)) boom = h_frames - 1; }
-    CHECK(boom - thrown == 31 * h_div, "explodes 3.1 s after the throw: %d frames (got %d)", 31 * h_div, boom - thrown);
+    CHECK(boom - window == 31 * h_div, "explodes 3.1 s after the throw: %d frames (got %d)", 31 * h_div, boom - window);
     for (int i = 0; i < 2 * h_rate; i++) h_tick(p, 0, 1);
     CHECK(h_explosions(m) == 1 && a - h_ammo(p) == 1, "one grenade, one ammo (got %d explosions, %d spent)", h_explosions(m), a - h_ammo(p));
 }
 
 
-/* A released re-tap while a grenade is
+/* D14 (from the external review): a released re-tap while a grenade is
  * cooking must not turn into a synthetic hold at the next weapon update.
  * The pending tap is consumed with gunframe 12 on that same update, and the
  * grenade flies 100 ms later, as at 10 Hz. */
@@ -694,23 +887,16 @@ static void sc_t10_grenade_pending_tap(void)
     if (arm < 0) return;
     int a = h_ammo(p);
 
-#ifdef HARNESS_OPENTDM
-    /* Reach an automatic weapon call. At higher world rates the next
-     * weapon update is still ahead when input arrives after RunFrame. */
-    int previous_next = p->client->next_weapon_think;
-    for (int i = 0; i < 3 * h_div && p->client->next_weapon_think == previous_next; i++) {
-        int dt = h_tick_ms(h_frames + 1, h_rate) - h_tick_ms(h_frames, h_rate);
-        h_think(p, BUTTON_ATTACK, dt);
-        h_frame();
-    }
-    CHECK(p->client->next_weapon_think > previous_next, "automatic weapon update occurred before the re-tap");
-#endif
-
     int msec = h_tick_ms(h_frames + 1, h_rate) - h_tick_ms(h_frames, h_rate);
     h_think(p, 0, 1);
     h_think(p, BUTTON_ATTACK, 1);
+#ifdef HARNESS_OPENTDM
+    CHECK(p->client->weapon_thunk, "the held attack has already used the window's weapon step");
+    h_think(p, 0, 1);
+    h_think(p, BUTTON_ATTACK, 1);
+    h_think(p, 0, msec - 4);
+#else
     h_think(p, 0, msec - 2);
-#ifndef HARNESS_OPENTDM
     /* FFA permits this first ClientThink call immediately; a second tap in
      * a later world frame, while weapon_thunk is set, creates pending. */
     h_frame();
@@ -721,9 +907,14 @@ static void sc_t10_grenade_pending_tap(void)
     }
 #endif
     CHECK(!(p->client->buttons & BUTTON_ATTACK), "last real input released attack");
+#ifdef HARNESS_OPENTDM
+    /* The current window already used its command step. */
+    int expected_release = h_frames + (h_div - h_frames % h_div) % h_div + h_div;
+#else
     int queued = p->client->attack_pending;
     if (h_div > 1)
         CHECK(queued, "the re-tap waits for a permitted weapon update");
+#endif
 
     int released = -1;
     for (int i = 0; i < 4 * h_div; i++) {
@@ -732,18 +923,29 @@ static void sc_t10_grenade_pending_tap(void)
         h_frame();
 #ifdef HARNESS_OPENTDM
         int gunframe = p->client->ps.gunframe;
+        if (gunframe == 12) {
+            CHECK(h_frames - 1 == expected_release,
+                  "grenade release advances at the first unused grid step (got %d, expected %d)",
+                  h_frames - 1, expected_release);
 #else
         int gunframe = p->client->weaponframe;
-#endif
         if (queued ? !p->client->attack_pending : gunframe == 12) {
+#endif
             released = h_frames - 1;
             printf("  info consumed frame=%d gunframe=%d real_buttons=%d fuse_frame=%d\n",
                    released, gunframe, p->client->buttons, p->client->grenade_framenum);
+#ifndef HARNESS_OPENTDM
             CHECK(gunframe == 12, "released cooking grenade advances to throw frame 12 at the permitted update (got %d)", gunframe);
+#endif
             break;
         }
     }
     CHECK(released >= 0, "a permitted weapon update occurred");
+#ifdef HARNESS_OPENTDM
+    int expected_throw = expected_release + h_div;
+#else
+    int expected_throw = released + h_div;
+#endif
 
     edict_t *g = NULL;
     int thrown = -1;
@@ -755,17 +957,15 @@ static void sc_t10_grenade_pending_tap(void)
         if (g) thrown = h_frames - 1;
     }
     printf("  info arm=%d consumed=%d thrown=%d expected_throw=%d delta=%d\n",
-           arm, released, thrown, released + h_div, thrown - released);
-    CHECK(g != NULL && thrown == released + h_div,
-          "one flying grenade on the following 100 ms weapon update (got frame %d, expected %d)", thrown, released + h_div);
+           arm, released, thrown, expected_throw, thrown - released);
+    CHECK(g != NULL && thrown == expected_throw,
+          "one flying grenade on the following 100 ms weapon update (got frame %d, expected %d)", thrown, expected_throw);
     CHECK(a - h_ammo(p) == 1, "exactly one grenade spent");
 }
 
 /* Death while holding an armed grenade: it goes off at once (timer 0) at
  * the first weapon processing after the death: one explosion, nothing in
- * flight. OpenTDM runs the dead player's weapon every world frame (the
- * death frame), OpenFFA on its 100 ms step (within h_div frames). The ammo
- * is not observable: the death clears the inventory before the fire. */
+ * flight. The death clears the inventory before the fire. */
 static void sc_t10_grenade_death(void)
 {
     edict_t *p = h_armed("grenades", "grenades", 5);
@@ -777,10 +977,13 @@ static void sc_t10_grenade_death(void)
     h_think(p, BUTTON_ATTACK, 1000 / h_rate);
     h_client_command(p, "kill");
     int k = h_frames, boom = -1;
+#ifdef HARNESS_OPENTDM
+    int death_step = k + (h_div - level.realframenum % h_div) % h_div;
+#endif
     for (int i = 0; i < 2 * h_div && boom < 0; i++) { h_frame(); if (h_explosions(m)) boom = h_frames - 1; }
     CHECK(p->deadflag, "dead");
 #ifdef HARNESS_OPENTDM
-    CHECK(boom == k, "explodes in the frame of the death (frame %d, got %d)", k, boom);
+    CHECK(boom == death_step, "explodes on the first grid step after death (frame %d, got %d)", death_step, boom);
 #else
     CHECK(boom >= k && boom < k + h_div, "explodes at the first weapon step after the death: frames [%d, %d) (got %d)", k, k + h_div, boom);
 #endif
@@ -857,10 +1060,6 @@ static int h_hurt_run(edict_t *p, int ticks, int ncmds, int *hits, int *sounds)
     return total;
 }
 
-/* normal: first hit in the tick of first contact, then one every 0.1 s:
- * 10 hits in [t0, t0 + 1 s); the sound has its own 1 s cooldown: once in
- * every second of contact, whatever the contact phase */
-
 /* leave the trigger and wait 2 s (the source debounce runs out) */
 static void h_hurt_leave(edict_t *p)
 {
@@ -870,52 +1069,78 @@ static void h_hurt_leave(edict_t *p)
     h_frame();      /* the HUD health stat follows at the end of a frame */
 }
 
+static void h_hurt_phase(edict_t *p, int phase)
+{
+    h_phase(p, phase);
+}
+
 static void sc_t11_hurt_normal(void)
 {
     h_hurt_scene(0);
     edict_t *p = h_join(0, "p1");
     static int hits[H_MAXTICKS];
-    int sounds, total;
-    /* first contact in every phase of the 100 ms step */
+    int sounds;
+    int second_phase = G_WindowFrame(h_rate) - h_rate;
     for (int k = 0; k < h_div; k++) {
         if (k) h_hurt_leave(p);
-        h_phase(p, k);                          /* the contact tick has phase k */
-        total = h_hurt_run(p, h_rate, 1, hits, &sounds);
-        CHECK(hits[0] == 1, "phase %d/%d: first hit in the contact tick (%d)", k, h_div, hits[0]);
-        CHECK(total == 10, "phase %d/%d: 10 hits in the first second (got %d)", k, h_div, total);
-        CHECK(h_snd[0] == 1, "phase %d/%d: hurt sound on the first touch (%d)", k, h_div, h_snd[0]);
-        CHECK(sounds == 1, "phase %d/%d: one hurt sound in the first second (got %d)", k, h_div, sounds);
+        h_hurt_phase(p, k);
+        int first = level.framenum;
+        int ticks = G_WindowFrame(first) + 9 * h_div - first + 1;
+        int total = h_hurt_run(p, ticks, 2, hits, &sounds);
+        CHECK(total == 10, "phase %d: ten hits in ten contact windows (got %d)", k, total);
+        for (int i = 0; i < ticks; i++) {
+            int window = G_WindowFrame(first + i);
+            int hit = !i || window != G_WindowFrame(first + i - 1);
+            CHECK(hits[i] == hit, "phase %d tick %d: first contact in window hits (%d, want %d)",
+                  k, i, hits[i], hit);
+            CHECK(h_snd[i] == (hit && window % h_rate == second_phase),
+                  "phase %d tick %d: sound only on a whole-second hit (%d)", k, i, h_snd[i]);
+        }
     }
-    /* the sound cooldown over 3 s of contact, in every phase */
-    for (int k = 0; k < h_div; k++) {
-        h_hurt_leave(p);
-        h_phase(p, k);
-        h_hurt_run(p, 3 * h_rate, 1, hits, &sounds);
-        int s1 = h_sum(h_snd, 0, h_rate), s2 = h_sum(h_snd, h_rate, 2 * h_rate), s3 = h_sum(h_snd, 2 * h_rate, 3 * h_rate);
-        CHECK(s1 == 1 && s2 == 1 && s3 == 1, "phase %d/%d: one hurt sound in each of 3 s of contact (got %d, %d, %d)",
-              k, h_div, s1, s2, s3);
-    }
+
     h_hurt_leave(p);
-    total = h_hurt_run(p, h_rate, 2, hits, &sounds);
-    CHECK(total == 10, "two usercmds per tick: still 10 hits per second (got %d)", total);
+    h_hurt_phase(p, 0);
+    CHECK(h_hurt_run(p, 1, 2, hits, &sounds) == 1, "last commands in a window share one hit");
+    h_place(p, 0, 0, 24);
+    for (int i = 0; i < h_div; i++)
+        h_tick(p, 0, 1);
+    CHECK(h_hurt_run(p, 1, 2, hits, &sounds) == 1, "reentry after one empty window hits immediately");
 }
 
-/* SLOW (16): one hit per second, each with its sound, in every contact phase */
 static void sc_t11_hurt_slow(void)
 {
     h_hurt_scene(16);
     edict_t *p = h_join(0, "p1");
     static int hits[H_MAXTICKS];
     int sounds;
+    int second_phase = G_WindowFrame(h_rate) - h_rate;
     for (int k = 0; k < h_div; k++) {
         if (k) h_hurt_leave(p);
-        h_phase(p, k);
-        int total = h_hurt_run(p, 2 * h_rate, 1, hits, &sounds);
-        CHECK(hits[0] == 1 && hits[h_rate] == 1, "phase %d/%d: SLOW hits at t0 and t0 + 1 s (%d, %d)",
-              k, h_div, hits[0], hits[h_rate]);
-        CHECK(total == 2, "phase %d/%d: SLOW: 2 hits in 2 s (got %d)", k, h_div, total);
-        CHECK(sounds == 2, "phase %d/%d: SLOW: a sound with each hit (got %d)", k, h_div, sounds);
+        h_hurt_phase(p, k);
+        int first = level.framenum;
+        int window = G_WindowFrame(first);
+        int second = window + 9 * h_div + 1 - first;
+        int total = h_hurt_run(p, second + 1, 1, hits, &sounds);
+        CHECK(hits[0] == 1 && hits[second] == 1 && total == 2,
+              "phase %d: SLOW hits on contact and at the next allowed window (%d, %d, total %d)",
+              k, hits[0], hits[second], total);
+        CHECK(sounds == (window % h_rate == second_phase ? 2 : 0),
+              "phase %d: SLOW sounds only on whole-second hits (got %d)", k, sounds);
     }
+}
+
+static void sc_t11_hurt_sound_grid(void)
+{
+    h_hurt_scene(16);
+    edict_t *p = h_join(0, "p1");
+    static int hits[H_MAXTICKS];
+    int sounds;
+    int off_second = (G_WindowFrame(h_rate) + 1) % h_rate;
+    while (level.framenum % h_rate != off_second)
+        h_frame();
+    int total = h_hurt_run(p, 2 * h_rate, 1, hits, &sounds);
+    CHECK(total == 2 && sounds == 0, "off-second SLOW contact: two hits and zero sounds (got %d, %d)",
+          total, sounds);
 }
 
 /* TOGGLE (2): the real use callback switches the source off and on; back
@@ -930,7 +1155,9 @@ static void sc_t11_hurt_toggle(void)
     CHECK(t != NULL, "toggleable trigger_hurt spawned");
     if (!t) return;
     static int hits[H_MAXTICKS];
-    int sounds, total = h_hurt_run(p, h_rate, 1, hits, &sounds);
+    int sounds;
+    h_hurt_phase(p, 1 % h_div);
+    int total = h_hurt_run(p, h_rate, 1, hits, &sounds);
     CHECK(total == 10, "on: 10 hits in 1 s (got %d)", total);
     t->use(t, p, p);
     total = h_hurt_run(p, 2 * h_rate, 1, hits, &sounds);
@@ -948,6 +1175,7 @@ static void sc_t11_hurt_silent(void)
     edict_t *p = h_join(0, "p1");
     static int hits[H_MAXTICKS];
     int sounds;
+    h_hurt_phase(p, 1 % h_div);
     int total = h_hurt_run(p, h_rate, 1, hits, &sounds);
     CHECK(total == 10 && sounds == 0, "SILENT: 10 hits, no sound (got %d, %d)", total, sounds);
 }
@@ -971,33 +1199,31 @@ static void sc_t11_hurt_no_protection_god(void)
     h_hurt_scene(8);
     edict_t *p = h_join(0, "p1");
     h_client_command(p, "god");
+    h_hurt_phase(p, 1 % h_div);
     int total = h_hurt_run(p, h_rate, 1, hits, &sounds);
     CHECK(total == 10, "god mode, NO_PROTECTION: 10 hits (got %d)", total);
 }
 
 /* One source, two players inside: the debounce is per source, so the
- * source deals one hit per world frame in total, and one sound per second. */
+ * source deals one hit per 100 ms window in total. */
 static void sc_t11_hurt_shared(void)
 {
     h_hurt_scene(0);
     edict_t *a = h_join(0, "p1"), *b = h_join(1, "p2");
-    int s = h_nsounds, sounds = -1;
+    h_hurt_phase(a, 0);
     h_place(a, 512, 0, 24);
-    h_think(a, 0, 1000 / h_rate);   /* the first touch */
+    h_think(a, 0, 1000 / h_rate);
     h_place(b, 512, 0, 24);
     h_think(b, 0, 1000 / h_rate);
     h_frame();
     int ha = h_hp(a), hb = h_hp(b);
     for (int i = 0; i < h_rate; i++) {
-        if (i == h_rate - 1)    /* frames [first touch, + 1 s) */
-            sounds = h_count_sounds(h_find(h_sounds, "world/electro.wav"), s);
         h_think(a, 0, 1000 / h_rate);
         h_think(b, 0, 1000 / h_rate);
         h_frame();
     }
     int da = ha - h_hp(a), db = hb - h_hp(b);
     CHECK(da + db == 10, "shared source: 10 hits per second over both players (got %d + %d)", da, db);
-    CHECK(sounds == 1, "shared source: one hurt sound in the first second over both players (got %d)", sounds);
 }
 
 /* Damage with knockback but no direction (hurt and crush pass a zero
@@ -1349,7 +1575,7 @@ static edict_t *h_by_class(const char *classname, int nth)
     return NULL;
 }
 
-/* The mod's blocked callbacks called within one world tick, as the
+/* The production blocked callbacks called within one world tick, as the
  * physics of several sources would: the limiter is per source/victim pair.
  * Two callbacks of one pair in a tick hit once; another victim and another
  * source hit at once; within 0.1 s the pair does not hit again; a freed
@@ -1399,7 +1625,7 @@ static void sc_t12_crush_pairs(void)
     CHECK(hp - h_hp_now(a) == exp, "the pair one tick later: %d hit(s) (got %d)", exp, hp - h_hp_now(a));
 }
 
-/* More than MAX_CRUSH pairs active within 0.1 s. MAX_CRUSH filler
+/* D14: more than MAX_CRUSH pairs active within 0.1 s. MAX_CRUSH filler
  * pairs keep the table full (G_CrushAllowed every tick, as the physics
  * would); further pairs limit per victim: the first hit at once, then at
  * most one per 0.1 s for all sources together; a pair that gets a table slot
@@ -1904,35 +2130,28 @@ static void sc_t13_carry_map(void)
  * of it): OpenTDM keeps its 100 ms controller, every speed held for 0.1 s
  * including the final remainder, 7 intervals as at 10 Hz; OpenFFA (dt
  * units per tick) within one 100 ms step of its 10 Hz duration. */
-#define H_T14_TICKS10 7     /* the 10 Hz duration of both mods on master */
+#define H_T14_TICKS10 7     /* the 10 Hz duration of both mods before task 8 */
 
 static void h_t14_plat(int zero)
 {
     h_scene_base();
-    int m = h_add_inline(-64, 1936, 0, 64, 2064, 64);
+    int m = h_add_inline(-64, 1936, 8, 64, 2064, 72);
     h_ent("{\n\"classname\" \"func_plat\"\n\"model\" \"*%d\"\n\"%s\" \"64\"\n}\n", m, zero ? "lip" : "height");
     h_start(h_ents);
     edict_t *plat = h_by_model("*1"), *p = h_join(0, "p1");
     CHECK(plat != NULL, "plat spawned");
     if (!plat) return;
-    h_place(p, 0, 2000, plat->absmax[2] + 24);
+    h_place(p, 0, 2000, plat->absmax[2] - 1 + 24 + 0.125f);
     h_tick(p, 0, 1);
+    if (!zero)
+        CHECK(p->groundentity == plat, "plat rider is grounded before departure");
     static hpath_t t;
-    float ride0 = 0, maxride = 0, vmaxz = 0;
-    int land = -1;
+    float ride0 = p->s.origin[2] - plat->s.origin[2], maxride = 0, vmaxz = 0;
     h_path_begin(&t, plat);
     for (int i = 0; i < 2 * h_rate; i++) {
         h_path_tick(&t, p);
-        /* the rider is placed a little above the plat and falls onto it; when
-         * it lands depends on the rate and the command schedule (from 1 to 6
-         * ticks) and is not under test. From that tick on its offset is fixed. */
-        if (land < 0 && p->groundentity == plat) {
-            land = i;
-            ride0 = p->s.origin[2] - plat->s.origin[2];
-        }
-        if (land >= 0) maxride = fmaxf(maxride, fabsf(p->s.origin[2] - plat->s.origin[2] - ride0));
-        if (h_verbose) printf("    rider[%d] = %.4f (raw %.4f, plat %.4f, ground %d)\n", i, p->s.origin[2] - plat->s.origin[2] - ride0,
-                              p->s.origin[2] - plat->s.origin[2], plat->s.origin[2], p->groundentity == plat);
+        maxride = fmaxf(maxride, fabsf(p->s.origin[2] - plat->s.origin[2] - ride0));
+        if (h_verbose) printf("    rider[%d] = %.4f (plat %.4f)\n", i, p->s.origin[2] - plat->s.origin[2] - ride0, plat->s.origin[2]);
         vmaxz = fmaxf(vmaxz, fabsf(plat->velocity[2]));
     }
     int ends = h_sounds_in(plat, plat->moveinfo.sound_end, t.f0, t.f0 + t.n);
@@ -1943,12 +2162,11 @@ static void h_t14_plat(int zero)
         CHECK(ends == 1, "zero path: one endfunc (got %d)", ends);
         return;
     }
+    CHECK(maxride <= H_EPS, "the rider moves with the plat (offset change %.4f)", maxride);
     CHECK(vmaxz <= 200 + H_EPS, "speed within 200 units/s (max %.3f)", vmaxz);
     int a, b;
     vec3_t end = { 0, 0, 64 }, vmax = { 0, 0, 200 };
     if (!h_path_seg(&t, 0, &a, &b)) { CHECK(0, "plat rose and stopped"); return; }
-    CHECK(land >= 0 && land < b, "the rider lands on the plat while it rises (tick %d, the rise ends at %d)", land, b);
-    CHECK(maxride <= H_EPS, "from then on the rider moves with the plat (offset change %.4f)", maxride);
     int d = h_path_check("plat", &t, a, b, end, vmax, plat->moveinfo.sound_end);
 #ifdef HARNESS_OPENTDM
     CHECK(d == H_T14_TICKS10 * h_div, "duration %d ticks = %d controller intervals of 100 ms", d, H_T14_TICKS10);
@@ -1965,14 +2183,14 @@ static void h_t14_plat(int zero)
 static void sc_t14_plat(void) { h_t14_plat(0); }
 static void sc_t14_plat_zero(void) { h_t14_plat(1); }
 
-/* T14 rider on a func_plat going down, the rider's
+/* T14 rider on a func_plat going down (task 14.2, design D12), the rider's
  * usercmds by HARNESS_SCHED. After each world tick from the departure: the
  * rider's ground is the plat, its height relative to the plat within 1/8 of
  * the settled one, no EV_FALL* and no health lost; the plat plays one start
  * and one end sound per leg, its loop sound is off while it stands, and the
  * durations of the legs of one direction differ by at most one tick.
- * cycles 0: a targeted plat at the top, used once, goes down 512 units;
- * cycles n: a PLAT_LOW_TRIGGER plat (the rider at
+ * cycles 0: a targeted plat at the top, used once, goes down 512 units (the
+ * external review scene); cycles n: a PLAT_LOW_TRIGGER plat (the rider at
  * the top stays out of the trigger) carries its rider up and down n times. */
 #define H_STATE_TOP 0
 #define H_STATE_BOTTOM 1
@@ -2038,8 +2256,8 @@ static void h_t14_ride(int cycles)
 static void sc_t14_plat_down(void) { h_t14_ride(0); }
 static void sc_t14_plat_cycles(void) { h_t14_ride(5); }
 
-/* T13 rollback of a team push with an idle rider:
- * a two-part team going down; A carries p1, B
+/* T13 rollback of a team push with an idle rider (task 14.2, design D12):
+ * a two-part team going down (the external review scene); A carries p1, B
  * is blocked by p2 against a world box, so the team rolls back every tick;
  * p1 sends no usercmd at all (no fresh ClientThink refreshes its ground).
  * p1 keeps the team leader as ground through the rollback and, after p2
@@ -2125,10 +2343,7 @@ static void sc_t13_viper_bomb_roll(void)
  * frame 3), then the secondary explosion 100 ms after the touch from the
  * touch point moved back by 100 ms of flight (x = 90 - 40 = 50):
  * 200 * (1 - sqrt(|(50,0,24) - (-20,150,28)| / 1000)) = 118 damage.
- * OpenTDM keeps that timing in world time. OpenFFA starts the laser and
- * the explosion on its 100 ms keyframe grid (1..FRAMEDIV frames): the
- * laser hits are shown, not checked. The explosion damage is the same in
- * both mods at every rate. */
+ * The movement, lasers and explosion all use the grid. */
 typedef struct { int lasers, touch, explode, boom; } hbfg_t;
 static hbfg_t h_bfg_shot(edict_t *owner, edict_t *target)
 {
@@ -2163,22 +2378,25 @@ static void sc_t11_bfg_wall(void)
     imp_linkentity(target);
     for (int k = 0; k < h_div; k++) {
         while (h_frames % h_div != k) h_frame();
+        int first_step = h_grid_wait() + 1;
         hbfg_t r = h_bfg_shot(owner, target);
         int delay = r.explode - r.touch;
         printf("  info phase %d/%d: %d laser hits, touch in frame %d, explosion %d frames later, %d damage\n",
                k, h_div, r.lasers, r.touch, delay, r.boom);
         CHECK(r.touch > 0 && r.explode > 0, "phase %d/%d: the ball touches the wall and explodes", k, h_div);
         CHECK(r.boom == 118, "phase %d/%d: secondary explosion 118 damage, as at 10 Hz (got %d)", k, h_div, r.boom);
-#ifdef HARNESS_OPENTDM
+        CHECK(r.touch == first_step + 2 * h_div,
+              "phase %d/%d: touches the wall on the third grid step (got frame %d, expected %d)",
+              k, h_div, r.touch, first_step + 2 * h_div);
         CHECK(r.lasers == 2, "phase %d/%d: 2 laser hits in flight, as at 10 Hz (got %d)", k, h_div, r.lasers);
         CHECK(delay == h_div, "phase %d/%d: explosion 100 ms (%d frames) after the touch (got %d)", k, h_div, h_div, delay);
-#else
-        CHECK(delay >= 1 && delay <= h_div, "phase %d/%d: explosion on the next 100 ms keyframe (1..%d frames, got %d)", k, h_div, h_div, delay);
-#endif
         h_frames_n(h_rate);
     }
 }
 
+/* ---------------------------------------------------------------- T15 */
+
+/* Two active players with distinct spawn points, past the team command limit. */
 static void h_tdm_pair(edict_t **a, edict_t **b)
 {
     h_scene_base();
@@ -2188,37 +2406,6 @@ static void h_tdm_pair(edict_t **a, edict_t **b)
     *b = h_join(1, "p2");
     h_frames_n(3 * h_rate);
 }
-
-
-static void h_real_phase(int k)
-{
-#ifdef HARNESS_OPENTDM
-    while (level.realframenum % h_div != k) h_frame();
-#else
-    while (level.framenum % h_div != k) h_frame();
-#endif
-}
-
-
-static void h_hit(edict_t *p, int damage)
-{
-    vec3_t dir = { 0, 0, 0 };
-    T_Damage(p, g_edicts, g_edicts, dir, p->s.origin, dir, damage, 0, 0, MOD_TRIGGER_HURT);
-}
-
-
-static int h_count_prefix(const char *prefix, int from)
-{
-    int c = 0;
-    for (int i = from; i < h_nsounds; i++) {
-        const char *n = h_sounds[h_sounds_log[i].soundindex];
-        c += n && !strncmp(n, prefix, strlen(prefix));
-    }
-    return c;
-}
-
-
-/* ---------------------------------------------------------------- T15 */
 
 #ifdef HARNESS_OPENTDM
 static const char *h_plain(const char *s)
@@ -2249,8 +2436,6 @@ static const char *h_hud_text(int frames)
     snprintf(b, sizeof(b), "%2d:%.2d", secs / 60, secs % 60);
     return b;
 }
-
-/* two players in the two teams, past the team command rate limit */
 
 /* both teams ready; runs the countdown and returns 1 once the match plays */
 static int h_tdm_start(edict_t *a, edict_t *b)
@@ -2459,9 +2644,9 @@ static void h_timeout_fire(int kind)
             CHECK(h_arm_grenade(a) >= 0, "phase %d: grenade armed", k);
         }
         /* the next weapon step k world frames ahead */
-        for (int i = 0; i < 3 * h_div && a->client->next_weapon_think - level.framenum != k; i++)
+        for (int i = 0; i < h_div && (h_div - level.realframenum % h_div) % h_div != k; i++)
             h_tick(a, BUTTON_ATTACK, 1);
-        CHECK(a->client->next_weapon_think - level.framenum == k, "phase %d/%d of the weapon step", k, h_div);
+        CHECK((h_div - level.realframenum % h_div) % h_div == k, "phase %d/%d of the weapon step", k, h_div);
         int ammo = h_ammo(a), m0 = h_nmsgs;
         h_client_command(a, "time");
         CHECK(tdm_match_status == MM_TIMEOUT, "phase %d: timeout (status %d)", k, tdm_match_status);
@@ -2493,8 +2678,653 @@ static void sc_t10_timeout_release_grenade(void) { h_timeout_fire(H_TO_RELEASE);
 static void sc_t10_timeout_hold_grenade(void) { h_timeout_fire(H_TO_HOLD); }
 #endif
 
+/* ---------------------------------------------------------------- T16 */
+
+/* the status sample after the last frame (abort the scenario on failure) */
+enum { H_PLAT_GRENADE, H_PLAT_HAND_GRENADE, H_PLAT_ITEM };
+
+static edict_t *h_plat_object(edict_t *player, edict_t *plat, int kind)
+{
+    vec3_t start = { 8, 2000, plat->absmax[2] - 1 + 4 }, dir = { 1, 0, 0 };
 #ifdef HARNESS_OPENTDM
-/* A stale sv_fps cvar cannot enable a capability the engine does not have. */
+    float fuse = 30;
+#else
+    int fuse = 30 * h_rate;
+#endif
+    edict_t *obj;
+    if (kind == H_PLAT_ITEM) {
+        obj = Drop_Item(player, FindItem("Shells"));
+    } else if (kind == H_PLAT_GRENADE) {
+        fire_grenade(player, start, dir, 120, 0, fuse, 160);
+        obj = h_by_class("grenade", 0);
+    } else {
+        fire_grenade2(player, start, dir, 125, 0, fuse, 165, false);
+        obj = h_by_class("hgrenade", 0);
+    }
+    if (!obj) imp_error("platform object did not spawn");
+    VectorCopy(start, obj->s.origin);
+    obj->s.origin[2] -= obj->mins[2];
+    VectorCopy(obj->s.origin, obj->old_origin);
+    VectorClear(obj->velocity);
+    gi.linkentity(obj);
+    return obj;
+}
+
+static void h_plat_object_ride(edict_t *plat, edict_t *obj, const char *name, int before, int linear)
+{
+    struct { int ticks, sounds, expected, first, last; } leg[2] = { 0 };
+    float offset = obj->s.origin[2] - plat->s.origin[2], drift = 0;
+    float last_grid_z = plat->s.origin[2];
+    int item = !strcmp(name, "item"), lost = 0;
+    for (int i = 0; i < 12 * h_rate; i++) {
+        float z = plat->s.origin[2];
+        int frame = h_frames, sound0 = h_nsounds;
+        h_frame();
+        float after = plat->s.origin[2];
+        float rider_z = before ? z : after;
+        int grid = frame % h_div == 0;
+        int impact = grid && !item && rider_z != last_grid_z;
+        if (grid)
+            last_grid_z = rider_z;
+        float dz = after - z;
+        if (dz) {
+            int down = dz < 0;
+            leg[down].ticks++;
+            leg[down].expected += impact;
+            for (int j = sound0; j < h_nsounds; j++) {
+                if (h_sounds_log[j].entnum != NUM(obj))
+                    continue;
+                if (leg[down].sounds++ == 0)
+                    leg[down].first = frame;
+                leg[down].last = frame;
+            }
+        }
+        lost += obj->groundentity != plat;
+        drift = fmaxf(drift, fabsf(obj->s.origin[2] - plat->s.origin[2] - offset));
+        if (leg[1].ticks && plat->moveinfo.state == H_STATE_BOTTOM) break;
+    }
+    CHECK(!lost && drift <= 0.125f + H_EPS, "%s: %d ticks without platform support, max height change %.4f",
+          name, lost, drift);
+    for (int down = 0; down < 2; down++) {
+        /* At 10 Hz a full leg has 16 impact sounds, or 15 when the object runs first. */
+        int baseline = item ? 0 : 16 - before;
+        int sounds = leg[down].sounds, ticks = leg[down].ticks;
+        int wanted = linear || h_div == 1 ? baseline : leg[down].expected;
+        CHECK(linear ? ticks == 16 * h_div : abs(ticks - 16 * h_div) <= h_div,
+              "%s %s: platform travel lasts %d ticks (10 Hz: 16 windows)", name, down ? "down" : "up", ticks);
+        CHECK(sounds == wanted && sounds <= ticks / h_div + 1,
+              "%s %s: %d sounds, grid expected %d, frames %d..%d (10 Hz reference %d)",
+              name, down ? "down" : "up", sounds, wanted, leg[down].first, leg[down].last, baseline);
+    }
+    CHECK(plat->moveinfo.state == H_STATE_BOTTOM, "%s: platform returned to bottom", name);
+}
+
+static void h_plat_object_lose_support(edict_t *plat, edict_t *obj, int phase, int grenade)
+{
+    /* Move the support sideways without carrying its rider. */
+    if (!grenade && h_div > 1 && !h_grid_wait())
+        h_frame();
+    float z = obj->s.origin[2];
+    plat->s.origin[0] += 256;
+    gi.linkentity(plat);
+    int falling = 0;
+    int limit = grenade ? h_div : 1;
+    for (int i = 0; i < limit && !falling; i++) {
+        h_frame();
+        falling = !obj->groundentity && obj->s.origin[2] < z;
+    }
+    CHECK(falling, "a support moved away drops its %s within %d ticks",
+          grenade ? "grenade" : "item", limit);
+
+    plat->s.origin[0] -= 256;
+    gi.linkentity(plat);
+    obj->s.origin[2] = plat->absmax[2] - 1 + 4 - obj->mins[2];
+    VectorClear(obj->velocity);
+    gi.linkentity(obj);
+    h_frames_n(h_rate);
+#ifdef HARNESS_OPENTDM
+    while (level.realframenum % h_div != phase) h_frame();
+#else
+    while (h_frames % h_div != phase) h_frame();
+#endif
+    CHECK(obj->groundentity == plat, "rider settled again before support removal");
+    z = obj->s.origin[2];
+    G_FreeEdict(plat);
+    h_frame();
+    CHECK(!obj->groundentity, "removing support clears the rider's ground in the same tick (phase %d)", phase);
+    for (int i = 1; i < limit && obj->s.origin[2] == z; i++)
+        h_frame();
+    CHECK(obj->s.origin[2] < z, "removing support drops the rider within %d ticks (phase %d)", limit, phase);
+}
+
+static void h_plat_object_scene(int linear)
+{
+    h_scene_base();
+    int model = h_add_inline(-64, 1936, 256, 64, 2064, 320);
+    h_ent("{\n\"classname\" \"func_plat\"\n\"model\" \"*%d\"\n\"height\" \"256\"\n%s}\n", model,
+          linear ? "\"speed\" \"1600\"\n\"accel\" \"1600\"\n\"decel\" \"1600\"\n" : "");
+    h_start(h_ents);
+    static const char *const names[] = { "grenade", "hand grenade", "item" };
+    for (int kind = H_PLAT_GRENADE; kind <= H_PLAT_ITEM; kind++) {
+        for (int before = 0; before < 2; before++) {
+            if (kind || before) {
+                while (h_frames % h_div)
+                    h_frame();
+#ifdef HARNESS_ENGINE
+                he_set_game(ge);   /* Clear the outgoing map's collision links before reusing edicts. */
+#endif
+                h_frames = 0; // A map load restarts the engine frame counter.
+                ge->SpawnEntities("harness", h_ents, "");
+            }
+            edict_t *plat = h_by_model("*1"), *player = h_join(0, "p1");
+            edict_t *trigger = NULL;
+            for (int n = 1; n < ge->num_edicts; n++) {
+                edict_t *ent = EDICT(n);
+                if (ent->inuse && ent->solid == SOLID_TRIGGER && ent->enemy == plat) trigger = ent;
+            }
+            if (!plat || !trigger) imp_error("platform or trigger did not spawn");
+            if (before) {
+                /* Reuse the slot of the unused single-player spawn point. */
+                G_FreeEdict(h_by_class("info_player_start", 0));
+                h_frames_n(3 * h_rate);
+            }
+            edict_t *obj = h_plat_object(player, plat, kind);
+            CHECK((NUM(obj) < NUM(plat)) == before, "%s: object %d, platform %d", names[kind], NUM(obj), NUM(plat));
+            h_frames_n(h_rate);
+            CHECK(obj->groundentity == plat, "%s settled on platform", names[kind]);
+            /* Move_Begin runs one tick after activation; the first push is a tick later. */
+            if (linear)
+                h_frames_n((h_grid_wait() + 2 * h_div - 2) % h_div);
+            trigger->touch(trigger, player, NULL, NULL);
+            h_plat_object_ride(plat, obj, names[kind], before, linear);
+            h_plat_object_lose_support(plat, obj, (kind * 2 + before) % h_div, kind != H_PLAT_ITEM);
+        }
+    }
+}
+
+static void sc_t24_plat_object(void) { h_plat_object_scene(0); }
+static void sc_t24_plat_object_linear(void) { h_plat_object_scene(1); }
+
+#ifdef HARNESS_ENGINE
+static void sc_t24_plat_real_debris(void)
+{
+    h_scene_base();
+    int model = h_add_inline(-64, 1936, 256, 64, 2064, 320);
+    h_ent("{\n\"classname\" \"func_plat\"\n\"model\" \"*%d\"\n\"height\" \"256\"\n\"targetname\" \"lower\"\n}\n", model);
+    h_start(h_ents);
+    edict_t *plat = h_by_model("*1"), *player = h_join(0, "p1");
+    if (!plat || !plat->use) imp_error("targeted platform did not spawn");
+    char gib_model[] = "models/objects/gibs/sm_meat/tris.md2";
+    vec3_t origin = { 8, 2000, 324 };
+    edict_t *obj = NULL;
+#ifdef HARNESS_OPENTDM
+    ThrowDebris(player, gib_model, 1, origin);
+    obj = h_by_class("debris", 0);
+#else
+    int index = gi.modelindex(gib_model);
+    ThrowGib(player, index, 100, GIB_METALLIC);
+    for (int i = game.maxclients + 1; i < ge->num_edicts; i++)
+        if (EDICT(i)->inuse && EDICT(i)->s.modelindex == index && (EDICT(i)->s.effects & EF_GIB))
+            obj = EDICT(i);
+#endif
+    if (!obj) imp_error("real debris did not spawn");
+    VectorCopy(origin, obj->s.origin);
+    VectorClear(obj->velocity);
+    gi.linkentity(obj);
+    h_frames_n(h_rate);
+    CHECK(obj->solid == SOLID_NOT && !obj->area.prev && obj->groundentity == plat,
+          "real non-solid debris settled without a collision area link");
+    float offset = obj->s.origin[2] - plat->s.origin[2];
+    plat->use(plat, player, player);
+    float drift = 0;
+    int moves = 0, lost = 0;
+    for (int i = 0; i < h_rate; i++) {
+        float z = plat->s.origin[2];
+        h_frame();
+        moves += plat->s.origin[2] < z;
+        lost += obj->groundentity != plat;
+        drift = fmaxf(drift, fabsf(obj->s.origin[2] - plat->s.origin[2] - offset));
+    }
+    CHECK(moves > 0, "real debris fixture platform descended");
+    if (h_div > 1)
+        CHECK(!lost && drift <= 0.01f, "real debris rides the descender (lost %d, drift %.4f)", lost, drift);
+    else
+        CHECK(drift > 0.01f, "10 Hz preserves the original non-solid debris ride");
+}
+#endif
+
+static int h_late_support_thinks;
+
+static void h_late_support_think(edict_t *ent)
+{
+    h_late_support_thinks++;
+}
+
+static void sc_t24_plat_late_support(void)
+{
+    h_scene_base();
+    int model = h_add_inline(-32, 1968, 128, 32, 2032, 192);
+    h_ent("{\n\"classname\" \"func_wall\"\n\"model\" \"*%d\"\n\"targetname\" \"support\"\n\"spawnflags\" \"7\"\n}\n", model);
+    h_ent("{\n\"classname\" \"func_timer\"\n\"target\" \"support\"\n\"wait\" \"60\"\n}\n");
+    h_start(h_ents);
+    edict_t *player = h_join(0, "p1"), *wall = h_by_model("*1"), *timer = h_by_class("func_timer", 0);
+    G_FreeEdict(h_by_class("info_player_start", 0));
+    edict_t *item = Drop_Item(player, FindItem("Shells"));
+    if (!item || !timer || !wall || NUM(item) >= NUM(timer)) imp_error("late support fixture needs item before timer");
+    VectorSet(item->s.origin, 0, 2000, 196 - item->mins[2]);
+    VectorClear(item->velocity);
+    gi.linkentity(item);
+    h_frames_n(h_rate);
+    CHECK(item->groundentity == wall, "item settled on the toggleable wall");
+    while (h_frames % h_div != h_div - 1) h_frame();
+    timer->nextthink = level.framenum + 1;
+    item->nextthink = timer->nextthink;
+    item->think = h_late_support_think;
+    h_late_support_thinks = 0;
+    h_frame();
+    float z = item->s.origin[2];
+    h_frame();
+    CHECK(wall->solid == SOLID_NOT, "upper slot timer switched off the wall");
+    CHECK(h_late_support_thinks == 1, "lower slot item thinks just once during support removal");
+    if (h_div > 1) {
+        CHECK(!item->groundentity && item->s.origin[2] < z,
+              "lower slot item starts falling in the tick of late wall removal");
+    } else {
+        CHECK(item->groundentity == wall && item->s.origin[2] == z,
+              "10 Hz preserves the original late support tick");
+        h_frame();
+        CHECK(!item->groundentity && item->s.origin[2] < z, "10 Hz item falls on its next turn");
+    }
+}
+
+static edict_t *h_plat_fuse_support;
+static int h_plat_blast_frame;
+static float h_plat_blast_offset;
+static void (*h_plat_grenade_explode)(edict_t *);
+
+static void h_plat_fuse_explode(edict_t *grenade)
+{
+    h_plat_blast_frame = h_frames;
+    h_plat_blast_offset = grenade->s.origin[2] - h_plat_fuse_support->s.origin[2];
+    h_plat_grenade_explode(grenade);
+}
+
+static void sc_t24_plat_fuse(void)
+{
+    h_scene_base();
+    int model = h_add_inline(-64, 1936, 256, 64, 2064, 320);
+    h_ent("{\n\"classname\" \"func_plat\"\n\"model\" \"*%d\"\n\"height\" \"256\"\n\"targetname\" \"lower\"\n}\n", model);
+    h_start(h_ents);
+    edict_t *plat = h_by_model("*1"), *player = h_join(0, "p1");
+    if (!plat || !plat->use) imp_error("targeted platform did not spawn");
+    edict_t *grenade = h_plat_object(player, plat, H_PLAT_GRENADE);
+    h_frames_n(h_rate);
+    CHECK(grenade->groundentity == plat, "timed grenade settled on the platform");
+    float offset = grenade->s.origin[2] - plat->s.origin[2];
+    while (h_frames % h_div) h_frame();
+    h_plat_fuse_support = plat;
+    h_plat_grenade_explode = grenade->think;
+    grenade->think = h_plat_fuse_explode;
+    grenade->nextthink = level.framenum + h_rate;
+    int deadline = h_frames + h_rate, messages = h_nmsgs;
+    h_plat_blast_frame = -1;
+    plat->use(plat, player, player);
+    h_frames_n(h_rate + 1);
+    CHECK(plat->moveinfo.state == H_STATE_DOWN && plat->s.origin[2] < 0, "grenade fuse ran during real platform descent");
+    CHECK(h_plat_blast_frame == deadline && h_explosions(messages) == 1,
+          "riding grenade explodes at its grid deadline (got %d, expected %d)", h_plat_blast_frame, deadline);
+    CHECK(fabsf(h_plat_blast_offset - offset) <= 0.01f,
+          "riding grenade explodes at its carried height (offset %.4f, expected %.4f)", h_plat_blast_offset, offset);
+}
+
+#ifdef HARNESS_OPENTDM
+static edict_t *h_view_player(void)
+{
+    edict_t *a, *b;
+    h_set_override("g_timeout_limit", "0");
+    h_tdm_pair(&a, &b);
+    if (!h_tdm_start(a, b)) return NULL;
+    h_place(a, 200, 0, 24);
+    h_tick(a, 0, 1);
+    h_place(b, 0, 0, 24);
+    h_tick(b, 0, 1);
+    h_frames_n(h_rate);
+    return a;
+}
+
+static void h_view_pause(edict_t *p)
+{
+    h_client_command(p, "time");
+    CHECK(tdm_match_status == MM_TIMEOUT, "timeout started (status %d)", tdm_match_status);
+}
+
+static void h_view_resume(edict_t *p)
+{
+    h_client_command(p, "time");
+    for (int i = 0; i < 15 * h_rate && tdm_match_status == MM_TIMEOUT; i++) h_frame();
+    CHECK(tdm_match_status == MM_PLAYING, "match resumed (status %d)", tdm_match_status);
+}
+
+static void h_view_sync(void)
+{
+    while (!FRAMESYNC) h_frame();
+}
+
+static int h_view_neutral(edict_t *p)
+{
+    player_state_t *ps = &p->client->ps;
+    return VectorCompare(ps->kick_angles, vec3_origin) && ps->viewoffset[2] == p->viewheight;
+}
+
+static void sc_t24_view_timeout_fall(void)
+{
+    edict_t *p = h_view_player();
+    if (!p) return;
+    player_state_t *ps = &p->client->ps;
+    h_place(p, 200, 0, 24 + 512);
+    for (int i = 0; i < 3 * h_rate && !ps->kick_angles[PITCH]; i++) h_tick(p, 0, 1);
+    CHECK(p->groundentity && ps->kick_angles[PITCH] > 0 && ps->viewoffset[2] < p->viewheight,
+          "landed with fall pitch %.4f and view height %.4f", ps->kick_angles[PITCH], ps->viewoffset[2]);
+    h_view_pause(p);
+    h_frames_n(3 * h_div);
+    CHECK(h_view_neutral(p), "fall recovers in 0.3 s of timeout (pitch %.4f, height %.4f, want 0 and %d)",
+          ps->kick_angles[PITCH], ps->viewoffset[2], p->viewheight);
+    int tilted = 0;
+    h_client_command(p, "time");
+    for (int i = 0; i < 15 * h_rate && tdm_match_status == MM_TIMEOUT; i++) {
+        h_frame();
+        tilted += !h_view_neutral(p);
+    }
+    CHECK(tdm_match_status == MM_PLAYING && !tilted, "view stays neutral until resume (%d tilted ticks)", tilted);
+    for (int i = 0; i < h_rate; i++) {
+        h_tick(p, 0, 1);
+        tilted += !h_view_neutral(p);
+    }
+    CHECK(!tilted, "fall kick does not return after resume (%d tilted ticks since recovery)", tilted);
+}
+
+static void h_view_damage(edict_t *p)
+{
+    edict_t *attacker = EDICT(2);
+    vec3_t dir = { -1, 0, 0 }, point, normal = { 0, 0, 0 }, velocity;
+    VectorCopy(p->s.origin, point);
+    point[0] += 100;
+    point[1] += 100;
+    int health = p->health;
+    VectorCopy(p->velocity, velocity);
+    T_Damage(p, attacker, attacker, dir, point, normal, 10, 20, DAMAGE_NO_KNOCKBACK, MOD_RAILGUN);
+    CHECK(p->health == health - 10 && VectorCompare(velocity, p->velocity),
+          "damage hit for 10 health without changing velocity");
+}
+
+/* Wait for the projectile: the BFG muzzleflash is the start of the windup. */
+static int h_view_bfg(edict_t *p)
+{
+    h_give(p, "bfg10k", 0);
+    h_give(p, "cells", 100);
+    h_use(p, "bfg10k");
+    h_view_sync();
+    int ammo = h_ammo(p);
+    int fired = 0;
+    for (int i = 0; i < 3 * h_rate && !fired; i++) {
+        init_genrand(1); /* Pin the random BFG roll before each possible firing frame. */
+        h_tick(p, i == 0 ? BUTTON_ATTACK : 0, 1);
+        fired = h_by_class("bfg blast", 0) != NULL && h_ammo(p) == ammo - 50;
+    }
+    CHECK(fired, "BFG projectile fired");
+    return fired ? level.realframenum - 1 : -1;
+}
+
+static void h_view_timeout_kick(edict_t *p, const char *event, int delay)
+{
+    h_view_pause(p);
+    float *angles = p->client->ps.kick_angles;
+    float previous = fabsf(angles[PITCH]);
+    int onset = previous > 0 ? 0 : -1, rises = 0, late = 0;
+    for (int i = 1; i <= h_rate; i++) {
+        h_frame();
+        float pitch = fabsf(angles[PITCH]);
+        if (pitch > 0 && onset < 0) onset = i;
+        rises += pitch > previous;
+        late += i >= delay + 5 * h_div && !VectorCompare(angles, vec3_origin);
+        previous = pitch;
+    }
+    CHECK(onset == delay && rises == (delay != 0), "%s kick appears once at tick %d (onset %d, %d increases)",
+          event, delay, onset, rises);
+    CHECK(!late && tdm_match_status == MM_TIMEOUT, "%s kick recovers within 0.5 s of onset in timeout (%d late ticks)",
+          event, late);
+    h_view_resume(p);
+    CHECK(h_view_neutral(p), "%s kick stays neutral at resume", event);
+}
+
+static void sc_t24_view_timeout_damage(void)
+{
+    edict_t *p = h_view_player();
+    if (!p) return;
+    h_view_sync();
+    if (h_div > 1) h_frame();   /* Enter timeout before the next damage feedback sample. */
+    h_view_damage(p);
+    if (h_div == 1) h_frame();
+    h_view_timeout_kick(p, "damage", h_div > 1 ? h_div : 0);
+
+    if (h_view_bfg(p) < 0) return;
+    for (int i = 0; i < h_div && !p->client->ps.kick_angles[PITCH]; i++) h_frame();
+    h_view_timeout_kick(p, "BFG", 0);
+}
+
+/* Pitch and roll at the 100 ms presentation samples from the pre-fix box
+ * harness. Fall height was sampled every world tick, including at 60 Hz. */
+static const float h_view_fall_angles[5][2] = {
+    { 12.5f, 0 }, { 8.333334f, 0 }, { 4.166667f, 0 },
+};
+static const float h_view_fall_height60[] = {
+    17, 17.277779f, 17.555555f, 17.833334f, 18.111111f, 18.388889f,
+    18.666666f, 18.944445f, 19.222221f, 19.5f, 19.777779f, 20.055555f,
+    20.333334f, 20.611111f, 20.888889f, 21.166666f, 21.444445f, 21.722221f,
+};
+static const float h_view_damage_angles[2][5][2] = {
+    {
+        { -4.7140455f, -4.7140455f }, { -3.7712364f, -3.7712364f }, { -2.8284273f, -2.8284273f },
+        { -1.8856182f, -1.8856182f }, { -0.9428091f, -0.9428091f },
+    }, {
+        /* The second hit is at 80 health, after the timeout. */
+        { -5.3033018f, -5.3033018f }, { -4.2426414f, -4.2426414f }, { -3.1819813f, -3.1819813f },
+        { -2.1213207f, -2.1213207f }, { -1.0606604f, -1.0606604f },
+    },
+};
+static const float h_view_bfg_angles[5][2] = {
+    { -40, 6.6723518f }, { -32, 5.3378816f }, { -24, 4.0034113f },
+    { -16, 2.6689408f }, { -8, 1.3344704f },
+};
+
+static void h_view_check_trace(edict_t *p, const char *event, const float angles[5][2])
+{
+    int wrong = 0;
+    for (int i = 0; i <= 6 * h_div; i++) {
+        player_state_t *ps = &p->client->ps;
+        int sample = i / h_div;
+        const float *want = sample < 5 ? angles[sample] : vec3_origin;
+        float z = 22;
+        if (angles == h_view_fall_angles && i < 3 * h_div)
+            z = h_view_fall_height60[i * 6 / h_div];
+        if (fabsf(ps->kick_angles[PITCH] - want[0]) > 0.00001f || ps->kick_angles[YAW] ||
+            fabsf(ps->kick_angles[ROLL] - want[1]) > 0.00001f || fabsf(ps->viewoffset[2] - z) > 0.00001f) {
+            if (!wrong++)
+                printf("  info %s tick %d: pitch %.6f roll %.6f height %.6f (want %.6f %.6f %.6f)\n",
+                       event, i, ps->kick_angles[PITCH], ps->kick_angles[ROLL], ps->viewoffset[2], want[0], want[1], z);
+        }
+        h_frame();
+    }
+    CHECK(!wrong, "%s camera matches the pre-fix trace (%d mismatched ticks)", event, wrong);
+}
+
+static void h_view_check_bfg(edict_t *p, int shot)
+{
+    int wrong = 0;
+    for (int i = 0; i <= 6 * h_div; i++) {
+        const player_state_t *ps = &p->client->ps;
+        int sample = (level.realframenum - 1) / h_div * h_div;
+        int elapsed = sample - shot;
+        float fraction = elapsed < 0 ? 0 : fmaxf(0, 1.f - (float)elapsed / (5 * h_div));
+        float pitch = h_view_bfg_angles[0][0] * fraction;
+        float roll = h_view_bfg_angles[0][1] * fraction;
+        if (fabsf(ps->kick_angles[PITCH] - pitch) > 0.00001f || ps->kick_angles[YAW] ||
+            fabsf(ps->kick_angles[ROLL] - roll) > 0.00001f || fabsf(ps->viewoffset[2] - 22) > 0.00001f) {
+            if (!wrong++)
+                printf("  info BFG sample %d, shot %d: pitch %.6f roll %.6f (want %.6f %.6f)\n",
+                       sample, shot, ps->kick_angles[PITCH], ps->kick_angles[ROLL], pitch, roll);
+        }
+        h_frame();
+    }
+    CHECK(!wrong, "BFG camera takes the first grid sample after the shot and decays for 0.5 s (%d mismatched ticks)",
+          wrong);
+}
+
+static void sc_t24_view_no_timeout(void)
+{
+    /* The pre-fix trace below is recorded for these two rates only. */
+    if (h_rate != 10 && h_rate != 60) {
+        printf("  info pre-fix camera trace exists for 10 and 60 Hz only, rate %d not compared\n", h_rate);
+        return;
+    }
+    edict_t *p = h_view_player();
+    if (!p) return;
+    for (int after = 0; after < 2; after++) {
+        if (after) {
+            h_view_pause(p);
+            h_frames_n(h_rate);
+            h_view_resume(p);
+            h_frames_n(h_rate);
+            CHECK(level.realframenum > level.framenum, "match clock is behind the world clock after resume");
+        }
+        /* The box Pmove cannot fall: feed the landing velocity transition
+         * to the real server frame, on the floor and at a presentation tick. */
+        h_view_sync();
+        p->client->oldvelocity[2] = -500;
+        h_frame();
+        h_view_check_trace(p, "fall", h_view_fall_angles);
+        h_view_sync();
+        h_view_damage(p);
+        h_frame();
+        h_view_check_trace(p, "damage", h_view_damage_angles[after]);
+        int shot = h_view_bfg(p);
+        if (shot < 0) return;
+        CHECK(shot % h_div == 0, "BFG fires on a grid frame (frame %d)", shot);
+        if (h_div == 1)
+            h_view_check_trace(p, "BFG", h_view_bfg_angles);
+        else
+            h_view_check_bfg(p, shot);
+        edict_t *blast = h_by_class("bfg blast", 0);
+        if (blast) G_FreeEdict(blast);
+    }
+}
+
+static void sc_t24_view_frozen(void)
+{
+    edict_t *p = h_view_player();
+    if (!p) return;
+    h_give(p, "quad damage", 0);
+    h_client_command(p, "use quad damage");
+    h_view_sync();
+    VectorSet(p->velocity, 180, 0, 0);
+    h_frame();
+    player_state_t *ps = &p->client->ps;
+    vec3_t kick, gun, offset;
+    CHECK(ps->kick_angles[PITCH] != 0 && ps->gunangles[PITCH] != 0 && p->client->bobtime > 0 &&
+          p->client->quad_framenum > (unsigned)level.framenum && p->air_finished_framenum > (unsigned)level.framenum,
+          "moving player has active speed tilt, bob, gun angle, quad and air");
+    p->waterlevel = 3;
+    p->watertype = CONTENTS_LAVA | CONTENTS_WATER;
+    h_view_pause(p);
+    h_view_sync();
+    VectorCopy(ps->kick_angles, kick);
+    VectorCopy(ps->gunangles, gun);
+    VectorCopy(ps->viewoffset, offset);
+    float bob = p->client->bobtime;
+    int frame = level.framenum, health = p->health;
+    unsigned quad = p->client->quad_framenum, air = p->air_finished_framenum;
+    h_frame();
+    CHECK(VectorCompare(ps->kick_angles, kick) && VectorCompare(ps->gunangles, gun) &&
+          VectorCompare(ps->viewoffset, offset) && p->client->bobtime == bob,
+          "view stays fixed on the first frozen frame");
+    CHECK(level.framenum == frame && p->client->quad_framenum == quad &&
+          p->air_finished_framenum == air && p->health == health,
+          "lava, air and powerup stay frozen on the first frozen frame");
+    int view_changed = 0, world_changed = 0;
+    for (int i = 0; i < h_rate; i++) {
+        h_frame();
+        view_changed += !VectorCompare(ps->kick_angles, kick) || !VectorCompare(ps->gunangles, gun) ||
+                        !VectorCompare(ps->viewoffset, offset) || p->client->bobtime != bob;
+        world_changed += level.framenum != frame || p->client->quad_framenum != quad ||
+                         p->air_finished_framenum != air || p->health != health;
+    }
+    CHECK(!view_changed, "speed tilt, bob and weapon angle stay frozen (%d changed ticks)", view_changed);
+    CHECK(!world_changed && tdm_match_status == MM_TIMEOUT, "powerup, air and environmental damage stay frozen (%d changed ticks)",
+          world_changed);
+    h_view_resume(p);
+    h_frames_n(h_div);
+    CHECK(p->health < health, "lava damages the player after resume");
+}
+#endif
+
+static void h_check_crush_log(int start, const char *expected)
+{
+    const char prefix[] = "Crush limiter: ";
+    int lines = 0, matches = 0;
+    for (int i = start; i < h_ndprints; i++) {
+        const char *text = h_dprints[i].text;
+        lines += !strncmp(text, prefix, sizeof(prefix) - 1);
+        matches += expected && !strcmp(text, expected);
+    }
+    CHECK(lines == (expected != NULL) && matches == lines, "crush log: %d lines, %d expected matches for %s",
+          lines, matches, expected ? expected : "no overflow");
+}
+
+static void sc_t24_crush_overflow_count(void)
+{
+    const char first_line[] = "Crush limiter: table full (64 pairs), limiting per victim\n";
+    h_scene_base();
+    h_start(h_ents);
+    edict_t *s1 = G_Spawn(), *s2 = G_Spawn(), *victim = G_Spawn();
+    h_crush_spawn_fill();
+    CHECK(h_crush_fill() == 64 && level.crush_overflows == 0, "64 active pairs fit without overflow");
+    h_check_crush_log(0, NULL);
+
+    int start = h_ndprints, first, gap;
+    int hits = h_crush_run(s1, s2, victim, 3 * h_div, &first, &gap);
+    CHECK(first == 0 && hits == 3 && gap == h_div && level.crush_overflows == 3,
+          "fallback allows 3 hits at 100 ms intervals and counts them (hits %d, total %llu)", hits, level.crush_overflows);
+    h_check_crush_log(start, first_line);
+
+    start = h_ndprints;
+    ge->SpawnEntities("next", h_ents, "");
+    CHECK(level.crush_overflows == 0, "overflow count resets at map change");
+    h_check_crush_log(start, "Crush limiter: overflow total on harness = 3\n");
+
+    start = h_ndprints;
+    s1 = G_Spawn();
+    victim = G_Spawn();
+    h_crush_spawn_fill();
+    CHECK(h_crush_fill() == 64 && G_CrushAllowed(s1, victim) && level.crush_overflows == 1,
+          "first fallback hit on the new map starts a new count");
+    h_check_crush_log(start, first_line);
+
+    start = h_ndprints;
+    h_shutdown();
+    CHECK(level.crush_overflows == 0, "overflow count resets at shutdown");
+    h_check_crush_log(start, "Crush limiter: overflow total on next = 1\n");
+    h_start(h_ents);
+    CHECK(level.crush_overflows == 0, "next map starts without a prior count");
+    h_shutdown();
+    h_check_crush_log(start, "Crush limiter: overflow total on next = 1\n");
+}
+
+/* ---------------------------------------------------------------- T17 */
+
+#ifdef HARNESS_OPENTDM
+/* `ghost` (join code) is rate limited for 200 ms, as at 10 Hz: a second
+ * command in the same frame and one 100 ms later are ignored, one 200 ms
+ * after the first is processed */
 static void sc_t01_fixed_engine(void)
 {
     h_scene_base();
@@ -2505,14 +3335,7 @@ static void sc_t01_fixed_engine(void)
     CHECK(SERVER_FPS == 10 && fabsf(FRAMETIME - 0.1f) < 1e-6f,
           "fixed engine ignores sv_fps 60: 10 Hz, 0.1 s (got %d, %.6f)", SERVER_FPS, FRAMETIME);
 }
-#endif
 
-/* ---------------------------------------------------------------- T17 */
-
-#ifdef HARNESS_OPENTDM
-/* `ghost` (join code) is rate limited for 200 ms, as at 10 Hz: a second
- * command in the same frame and one 100 ms later are ignored, one 200 ms
- * after the first is processed */
 static void sc_t17_ghost_ratelimit(void)
 {
     edict_t *a, *b;
@@ -2560,11 +3383,24 @@ static void sc_t17_ping_handicap(void)
  * any rate, on the real frame counter (it keeps running in a timeout).
  * The world is driven with bare h_frame() where the box Pmove would reset
  * the field under test (ground, water level, view angles). */
-#ifdef HARNESS_OPENTDM
 /* idle frames until the next frame has real frame phase k of the 100 ms
  * window (ClientEndServerFrame sees realframenum before its increment) */
+static void h_real_phase(int k)
+{
+#ifdef HARNESS_OPENTDM
+    while (level.realframenum % h_div != k) h_frame();
+#else
+    while (h_frames % h_div != k) h_frame();
+#endif
+}
 
+static void h_hit(edict_t *p, int damage)
+{
+    vec3_t dir = { 0, 0, 0 };
+    T_Damage(p, g_edicts, g_edicts, dir, p->s.origin, dir, damage, 0, 0, MOD_TRIGGER_HURT);
+}
 
+#ifdef HARNESS_OPENTDM
 /* One hit, in every phase of the window: the HUD flash lasts one 100 ms
  * window (h_div frames), not one world frame. */
 static void sc_t18_flash_window(void)
@@ -2664,8 +3500,20 @@ static void sc_t18_lava_sound(void)
     CHECK(burns == 2, "2 s in lava: 2 burn sounds (got %d)", burns);
 }
 
-/* sound calls since log index `from` whose name starts with `prefix` */
+#endif
 
+/* sound calls since log index `from` whose name starts with `prefix` */
+static int h_count_prefix(const char *prefix, int from)
+{
+    int c = 0;
+    for (int i = from; i < h_nsounds; i++) {
+        const char *n = h_sounds[h_sounds_log[i].soundindex];
+        c += n && !strncmp(n, prefix, strlen(prefix));
+    }
+    return c;
+}
+
+#ifdef HARNESS_OPENTDM
 /* A hard landing (fall damage), in every phase of the window: the fall
  * sound, and no normal pain sound with it (the feedback of its window). */
 static void sc_t18_fall_pain(void)
@@ -2685,6 +3533,12 @@ static void sc_t18_fall_pain(void)
         int fall = h_count_prefix("*fall", s), pain = h_count_prefix("*pain", s);
         CHECK(h_hp(p) < hp && fall == 1, "phase %d/%d: fall damage and its sound (health+armor %d -> %d, %d sounds)",
               k, h_div, hp, h_hp(p), fall);
+        for (int i = s; i < h_nsounds; i++) {
+            const char *sound = h_sounds[h_sounds_log[i].soundindex];
+            if (sound && !strncmp(sound, "*fall", 5))
+                CHECK(h_sounds_log[i].frame % h_div == 0, "phase %d: fall sound is on the grid (at %d)",
+                      k, h_sounds_log[i].frame);
+        }
         CHECK(pain == 0, "phase %d/%d: no pain sound with the fall (got %d)", k, h_div, pain);
     }
 }
@@ -2708,9 +3562,21 @@ static void sc_t18_drown_pain(void)
     CHECK(pain == 0, "drowning: no pain sound (got %d)", pain);
 }
 
-/* Quad with exactly 3 s left when a timeout starts: the fade warning is
- * not repeated through the pause (frozen game clock), it sounds once,
- * when the clock runs again. */
+static void h_check_powerup_warning_resume(int sound, int mark, int resume)
+{
+    int count = 0, frame = -1;
+    for (int i = mark; i < h_nsounds; i++) {
+        if (h_sounds_log[i].soundindex == sound) {
+            count++;
+            frame = h_sounds_log[i].frame;
+        }
+    }
+    CHECK(count == 1 && frame == resume,
+          "powerup warns once on the first unfrozen grid frame (got %d warnings at %d, want frame %d)",
+          count, frame, resume);
+}
+
+/* The warning becomes eligible on the same grid frame as the timeout. */
 static void sc_t18_powerup_warn_timeout(void)
 {
     edict_t *a, *b;
@@ -2718,33 +3584,31 @@ static void sc_t18_powerup_warn_timeout(void)
     if (!h_tdm_start(a, b)) return;
     h_give(a, "quad damage", 0);
     h_client_command(a, "use quad damage");
+    h_real_phase(0);
     h_frame();
     CHECK(a->s.effects & EF_QUAD, "quad active");
-    while (a->client->quad_framenum - level.framenum > 3 * h_rate) h_frame();
+    while (a->client->quad_framenum - level.framenum > 3 * h_rate + (h_div > 1)) h_frame();
     int s = h_nsounds;
-    h_client_command(a, "time");
-    CHECK(tdm_match_status == MM_TIMEOUT, "timeout (status %d)", tdm_match_status);
+    int sound = imp_soundindex("items/damage2.wav");
+    h_view_pause(a);
     h_frames_n(h_rate);
-    int w = h_find(h_sounds, "items/damage2.wav"), paused = w > 0 ? h_count_sounds(w, s) : 0;
-    h_client_command(a, "time");
-    for (int i = 0; i < 15 * h_rate && tdm_match_status == MM_TIMEOUT; i++) h_frame();
-    CHECK(tdm_match_status == MM_PLAYING, "resumed (status %d)", tdm_match_status);
+    CHECK(h_count_sounds(sound, s) == 0, "no warning while the powerup clock is frozen");
+    h_view_resume(a);
+    int resume = h_frames - 1;
     h_frames_n(h_rate);
-    w = h_find(h_sounds, "items/damage2.wav");
-    int total = w > 0 ? h_count_sounds(w, s) : 0;
-    CHECK(paused <= 1, "1 s of timeout at 3 s left: at most one warning (got %d)", paused);
-    CHECK(total == 1, "through the timeout and 1 s after: one warning (got %d)", total);
+    h_check_powerup_warning_resume(sound, s, resume);
 }
 
-/* After a timeout the real and game frame phases can differ. Environment
- * damage resumes on the real 100 ms grid, and stays off during the pause. */
+/* Lava and slime stay frozen, then tick at the resumed world grid. */
 static void sc_t18_environment_resume(void)
 {
     edict_t *a, *b;
     h_tdm_pair(&a, &b);
     if (!h_tdm_start(a, b)) return;
-    h_client_command(a, "time");
-    CHECK(tdm_match_status == MM_TIMEOUT, "timeout");
+    h_view_pause(a);
+    for (int step = 0; step <= h_div && !level.timeout_frozen; step++)
+        h_frame();
+    CHECK(tdm_match_status == MM_TIMEOUT && level.timeout_frozen, "world is frozen");
     a->waterlevel = 1;
     a->watertype = CONTENTS_LAVA;
     int hp = h_hp_now(a), frozen = level.framenum;
@@ -2755,7 +3619,7 @@ static void sc_t18_environment_resume(void)
     for (int i = 0; i < 15 * h_rate && tdm_match_status == MM_TIMEOUT; i++) h_frame();
     CHECK(tdm_match_status == MM_PLAYING, "resumed");
     if (h_div > 1)
-        CHECK(level.framenum % h_div != level.realframenum % h_div, "game and real phases differ");
+        CHECK(level.framenum % h_div == level.realframenum % h_div, "game and real phases agree");
     for (int liquid = 0; liquid < 2; liquid++) {
         h_give(a, "health", 100);
         int total = 0, wrong = 0;
@@ -2802,463 +3666,6 @@ static void sc_t18_kick_timeout(void)
           a->client->ps.kick_angles[0], a->client->ps.kick_angles[1], a->client->ps.kick_angles[2]);
 }
 #endif
-
-/* ---------------------------------------------------------------- T24 */
-
-enum { H_PLAT_GRENADE, H_PLAT_HAND_GRENADE, H_PLAT_ITEM };
-
-static edict_t *h_plat_object(edict_t *player, edict_t *plat, int kind)
-{
-    vec3_t start = { 8, 2000, plat->absmax[2] - 1 + 4 }, dir = { 1, 0, 0 };
-#ifdef HARNESS_OPENTDM
-    float fuse = 30;
-#else
-    int fuse = 30 * h_rate;
-#endif
-    edict_t *obj;
-    if (kind == H_PLAT_ITEM) {
-        obj = Drop_Item(player, FindItem("Shells"));
-    } else if (kind == H_PLAT_GRENADE) {
-        fire_grenade(player, start, dir, 120, 0, fuse, 160);
-        obj = h_by_class("grenade", 0);
-    } else {
-        fire_grenade2(player, start, dir, 125, 0, fuse, 165, false);
-        obj = h_by_class("hgrenade", 0);
-    }
-    if (!obj) imp_error("platform object did not spawn");
-    VectorCopy(start, obj->s.origin);
-    obj->s.origin[2] -= obj->mins[2];
-    VectorCopy(obj->s.origin, obj->old_origin);
-    VectorClear(obj->velocity);
-    gi.linkentity(obj);
-    return obj;
-}
-
-static void h_plat_object_ride(edict_t *plat, edict_t *obj, const char *name, int before)
-{
-    struct { int ticks, steps, sounds, off_step; } leg[2] = { 0 };
-    float offset = obj->s.origin[2] - plat->s.origin[2], drift = 0;
-    int lost = 0;
-    for (int i = 0; i < 12 * h_rate; i++) {
-        float z = plat->s.origin[2];
-        int sound0 = h_nsounds, classic_step = FRAMESYNC;
-        h_frame();
-        float dz = plat->s.origin[2] - z;
-        if (dz) {
-            int down = dz < 0;
-            leg[down].ticks++;
-            leg[down].steps += classic_step;
-            for (int j = sound0; j < h_nsounds; j++) {
-                if (h_sounds_log[j].entnum != NUM(obj)) continue;
-                leg[down].sounds++;
-                leg[down].off_step += !classic_step;
-            }
-        }
-        lost += obj->groundentity != plat;
-        drift = fmaxf(drift, fabsf(obj->s.origin[2] - plat->s.origin[2] - offset));
-        if (leg[1].ticks && plat->moveinfo.state == H_STATE_BOTTOM) break;
-    }
-    CHECK(!lost && drift <= 0.125f + H_EPS, "%s: %d ticks without platform support, max height change %.4f",
-          name, lost, drift);
-    for (int down = 0; down < 2; down++) {
-        /* At 10 Hz a full leg has 16 impact sounds, or 15 when the object runs first. */
-        int baseline = !strcmp(name, "item") ? 0 : 16 - before;
-        int sounds = leg[down].sounds, ticks = leg[down].ticks;
-        /* Intermediate rates can put an extra 100 ms step inside the moving leg. */
-        int recorded = h_rate == 10 || h_rate == 60;
-        int reference = baseline && !recorded ? leg[down].steps : baseline;
-        int allowance = reference && h_rate != 10;
-        CHECK(ticks >= h_rate && !leg[down].off_step && abs(sounds - reference) <= allowance &&
-              sounds <= ticks / h_div + 1,
-              "%s %s: %d sounds in %d ticks (%s %d, %d sounds between 100 ms steps)",
-              name, down ? "down" : "up", sounds, ticks, recorded ? "10 Hz reference" : "reference from moving ticks",
-              reference, leg[down].off_step);
-    }
-    CHECK(plat->moveinfo.state == H_STATE_BOTTOM, "%s: platform returned to bottom", name);
-}
-
-static void h_plat_object_lose_support(edict_t *plat, edict_t *obj, int phase)
-{
-    /* Move the support sideways without carrying its rider. */
-    float z = obj->s.origin[2];
-    plat->s.origin[0] += 256;
-    gi.linkentity(plat);
-    int falling = 0;
-    for (int i = 0; i < h_div && !falling; i++) {
-        h_frame();
-        falling = !obj->groundentity && obj->s.origin[2] < z;
-    }
-    CHECK(falling, "a support moved away drops its rider within %d ticks", h_div);
-
-    plat->s.origin[0] -= 256;
-    gi.linkentity(plat);
-    obj->s.origin[2] = plat->absmax[2] - 1 + 4 - obj->mins[2];
-    VectorClear(obj->velocity);
-    gi.linkentity(obj);
-    h_frames_n(h_rate);
-#ifdef HARNESS_OPENTDM
-    while (level.realframenum % h_div != phase) h_frame();
-#else
-    while (level.framenum % h_div != phase) h_frame();
-#endif
-    CHECK(obj->groundentity == plat, "rider settled again before support removal");
-    z = obj->s.origin[2];
-    G_FreeEdict(plat);
-    h_frame();
-    CHECK(!obj->groundentity && obj->s.origin[2] < z, "removing support drops rider in the same tick (phase %d)", phase);
-}
-
-static void sc_t24_plat_object(void)
-{
-    h_scene_base();
-    int model = h_add_inline(-64, 1936, 256, 64, 2064, 320);
-    h_ent("{\n\"classname\" \"func_plat\"\n\"model\" \"*%d\"\n\"height\" \"256\"\n}\n", model);
-    h_start(h_ents);
-    static const char *const names[] = { "grenade", "hand grenade", "item" };
-    for (int kind = H_PLAT_GRENADE; kind <= H_PLAT_ITEM; kind++) {
-        for (int before = 0; before < 2; before++) {
-            if (kind || before) {
-#ifdef HARNESS_ENGINE
-                he_set_game(ge);   /* Clear the outgoing map's collision links before reusing edicts. */
-#endif
-                ge->SpawnEntities("harness", h_ents, "");
-            }
-            edict_t *plat = h_by_model("*1"), *player = h_join(0, "p1");
-            edict_t *trigger = NULL;
-            for (int n = 1; n < ge->num_edicts; n++) {
-                edict_t *ent = EDICT(n);
-                if (ent->inuse && ent->solid == SOLID_TRIGGER && ent->enemy == plat) trigger = ent;
-            }
-            if (!plat || !trigger) imp_error("platform or trigger did not spawn");
-            if (before) {
-                /* Reuse the slot of the unused single-player spawn point. */
-                G_FreeEdict(h_by_class("info_player_start", 0));
-                h_frames_n(3 * h_rate);
-            }
-            edict_t *obj = h_plat_object(player, plat, kind);
-            CHECK((NUM(obj) < NUM(plat)) == before, "%s: object %d, platform %d", names[kind], NUM(obj), NUM(plat));
-            h_frames_n(h_rate);
-            CHECK(obj->groundentity == plat, "%s settled on platform", names[kind]);
-            trigger->touch(trigger, player, NULL, NULL);
-            h_plat_object_ride(plat, obj, names[kind], before);
-            h_plat_object_lose_support(plat, obj, (kind * 2 + before) % h_div);
-        }
-    }
-}
-
-#ifdef HARNESS_OPENTDM
-static edict_t *h_view_player(void)
-{
-    edict_t *a, *b;
-    h_set_override("g_timeout_limit", "0");
-    h_tdm_pair(&a, &b);
-    if (!h_tdm_start(a, b)) return NULL;
-    h_place(a, 200, 0, 24);
-    h_tick(a, 0, 1);
-    h_place(b, 0, 0, 24);
-    h_tick(b, 0, 1);
-    h_frames_n(h_rate);
-    return a;
-}
-
-static void h_view_pause(edict_t *p)
-{
-    h_client_command(p, "time");
-    CHECK(tdm_match_status == MM_TIMEOUT, "timeout started (status %d)", tdm_match_status);
-}
-
-static void h_view_resume(edict_t *p)
-{
-    h_client_command(p, "time");
-    for (int i = 0; i < 15 * h_rate && tdm_match_status == MM_TIMEOUT; i++) h_frame();
-    CHECK(tdm_match_status == MM_PLAYING, "match resumed (status %d)", tdm_match_status);
-}
-
-static void h_view_sync(void)
-{
-    while (!FRAMESYNC) h_frame();
-}
-
-static int h_view_neutral(edict_t *p)
-{
-    player_state_t *ps = &p->client->ps;
-    return VectorCompare(ps->kick_angles, vec3_origin) && ps->viewoffset[2] == p->viewheight;
-}
-
-static void sc_t24_view_timeout_fall(void)
-{
-    edict_t *p = h_view_player();
-    if (!p) return;
-    player_state_t *ps = &p->client->ps;
-    h_place(p, 200, 0, 24 + 512);
-    for (int i = 0; i < 3 * h_rate && !ps->kick_angles[PITCH]; i++) h_tick(p, 0, 1);
-    CHECK(p->groundentity && ps->kick_angles[PITCH] > 0 && ps->viewoffset[2] < p->viewheight,
-          "landed with fall pitch %.4f and view height %.4f", ps->kick_angles[PITCH], ps->viewoffset[2]);
-    h_view_pause(p);
-    h_frames_n(3 * h_div);
-    CHECK(h_view_neutral(p), "fall recovers in 0.3 s of timeout (pitch %.4f, height %.4f, want 0 and %d)",
-          ps->kick_angles[PITCH], ps->viewoffset[2], p->viewheight);
-    int tilted = 0;
-    h_client_command(p, "time");
-    for (int i = 0; i < 15 * h_rate && tdm_match_status == MM_TIMEOUT; i++) {
-        h_frame();
-        tilted += !h_view_neutral(p);
-    }
-    CHECK(tdm_match_status == MM_PLAYING && !tilted, "view stays neutral until resume (%d tilted ticks)", tilted);
-    for (int i = 0; i < h_rate; i++) {
-        h_tick(p, 0, 1);
-        tilted += !h_view_neutral(p);
-    }
-    CHECK(!tilted, "fall kick does not return after resume (%d tilted ticks since recovery)", tilted);
-}
-
-static void h_view_damage(edict_t *p)
-{
-    edict_t *attacker = EDICT(2);
-    vec3_t dir = { -1, 0, 0 }, point, normal = { 0, 0, 0 }, velocity;
-    VectorCopy(p->s.origin, point);
-    point[0] += 100;
-    point[1] += 100;
-    int health = p->health;
-    VectorCopy(p->velocity, velocity);
-    T_Damage(p, attacker, attacker, dir, point, normal, 10, 20, DAMAGE_NO_KNOCKBACK, MOD_RAILGUN);
-    CHECK(p->health == health - 10 && VectorCompare(velocity, p->velocity),
-          "damage hit for 10 health without changing velocity");
-}
-
-/* Wait for the projectile: the BFG muzzleflash is the start of the windup. */
-static int h_view_bfg(edict_t *p)
-{
-    h_give(p, "bfg10k", 0);
-    h_give(p, "cells", 100);
-    h_use(p, "bfg10k");
-    h_view_sync();
-    int ammo = h_ammo(p);
-    int fired = 0;
-    for (int i = 0; i < 3 * h_rate && !fired; i++) {
-        init_genrand(1); /* Pin the random BFG roll before each possible firing frame. */
-        h_tick(p, i == 0 ? BUTTON_ATTACK : 0, 1);
-        fired = h_by_class("bfg blast", 0) != NULL && h_ammo(p) == ammo - 50;
-    }
-    CHECK(fired, "BFG projectile fired");
-    return fired;
-}
-
-static void h_view_timeout_kick(edict_t *p, const char *event, int delay)
-{
-    h_view_pause(p);
-    float *angles = p->client->ps.kick_angles;
-    float previous = fabsf(angles[PITCH]);
-    int onset = previous > 0 ? 0 : -1, rises = 0, late = 0;
-    for (int i = 1; i <= h_rate; i++) {
-        h_frame();
-        float pitch = fabsf(angles[PITCH]);
-        if (pitch > 0 && onset < 0) onset = i;
-        rises += pitch > previous;
-        late += i >= delay + 5 * h_div && !VectorCompare(angles, vec3_origin);
-        previous = pitch;
-    }
-    CHECK(onset == delay && rises == (delay != 0), "%s kick appears once at tick %d (onset %d, %d increases)",
-          event, delay, onset, rises);
-    CHECK(!late && tdm_match_status == MM_TIMEOUT, "%s kick recovers within 0.5 s of onset in timeout (%d late ticks)",
-          event, late);
-    h_view_resume(p);
-    CHECK(h_view_neutral(p), "%s kick stays neutral at resume", event);
-}
-
-static void sc_t24_view_timeout_damage(void)
-{
-    edict_t *p = h_view_player();
-    if (!p) return;
-    h_view_sync();
-    if (h_div > 1) h_frame();   /* Enter timeout before the next damage feedback sample. */
-    h_view_damage(p);
-    if (h_div == 1) h_frame();
-    h_view_timeout_kick(p, "damage", h_div > 1 ? h_div : 0);
-
-    if (!h_view_bfg(p)) return;
-    for (int i = 0; i < h_div && !p->client->ps.kick_angles[PITCH]; i++) h_frame();
-    h_view_timeout_kick(p, "BFG", 0);
-}
-
-/* Pitch and roll at the 100 ms presentation samples from the pre-fix box
- * harness. Fall height was sampled every world tick, including at 60 Hz. */
-static const float h_view_fall_angles[5][2] = {
-    { 12.5f, 0 }, { 8.333334f, 0 }, { 4.166667f, 0 },
-};
-static const float h_view_fall_height60[] = {
-    17, 17.277779f, 17.555555f, 17.833334f, 18.111111f, 18.388889f,
-    18.666666f, 18.944445f, 19.222221f, 19.5f, 19.777779f, 20.055555f,
-    20.333334f, 20.611111f, 20.888889f, 21.166666f, 21.444445f, 21.722221f,
-};
-static const float h_view_damage_angles[2][5][2] = {
-    {
-        { -4.7140455f, -4.7140455f }, { -3.7712364f, -3.7712364f }, { -2.8284273f, -2.8284273f },
-        { -1.8856182f, -1.8856182f }, { -0.9428091f, -0.9428091f },
-    }, {
-        /* The second hit is at 80 health, after the timeout. */
-        { -5.3033018f, -5.3033018f }, { -4.2426414f, -4.2426414f }, { -3.1819813f, -3.1819813f },
-        { -2.1213207f, -2.1213207f }, { -1.0606604f, -1.0606604f },
-    },
-};
-static const float h_view_bfg_angles[2][5][2] = {
-    {
-        { -40, 6.6723518f }, { -32, 5.3378816f }, { -24, 4.0034113f },
-        { -16, 2.6689408f }, { -8, 1.3344704f },
-    }, {
-        { -36, 6.0051165f }, { -28, 4.6706462f }, { -20, 3.3361759f },
-        { -12, 2.0017056f }, { -4, 0.6672352f },
-    },
-};
-
-static void h_view_check_trace(edict_t *p, const char *event, const float angles[5][2], int delay)
-{
-    int wrong = 0;
-    for (int i = 0; i <= 6 * h_div; i++) {
-        player_state_t *ps = &p->client->ps;
-        int sample = i >= delay ? (i - delay) / h_div : -1;
-        const float *want = sample >= 0 && sample < 5 ? angles[sample] : vec3_origin;
-        float z = 22;
-        if (angles == h_view_fall_angles && i < 3 * h_div)
-            z = h_view_fall_height60[i * 6 / h_div];
-        if (fabsf(ps->kick_angles[PITCH] - want[0]) > 0.00001f || ps->kick_angles[YAW] ||
-            fabsf(ps->kick_angles[ROLL] - want[1]) > 0.00001f || fabsf(ps->viewoffset[2] - z) > 0.00001f) {
-            if (!wrong++)
-                printf("  info %s tick %d: pitch %.6f roll %.6f height %.6f (want %.6f %.6f %.6f)\n",
-                       event, i, ps->kick_angles[PITCH], ps->kick_angles[ROLL], ps->viewoffset[2], want[0], want[1], z);
-        }
-        h_frame();
-    }
-    CHECK(!wrong, "%s camera matches the pre-fix trace (%d mismatched ticks)", event, wrong);
-}
-
-static void sc_t24_view_no_timeout(void)
-{
-    /* The pre-fix trace below is recorded for these two rates only. */
-    if (h_rate != 10 && h_rate != 60) {
-        printf("  info pre-fix camera trace exists for 10 and 60 Hz only, rate %d not compared\n", h_rate);
-        return;
-    }
-    edict_t *p = h_view_player();
-    if (!p) return;
-    for (int after = 0; after < 2; after++) {
-        if (after) {
-            h_view_pause(p);
-            h_frames_n(h_rate);
-            h_view_resume(p);
-            h_frames_n(h_rate);
-            CHECK(level.realframenum > level.framenum, "match clock is behind the world clock after resume");
-        }
-        /* The box Pmove cannot fall: feed the landing velocity transition
-         * to the real server frame, on the floor and at a presentation tick. */
-        h_view_sync();
-        p->client->oldvelocity[2] = -500;
-        h_frame();
-        h_view_check_trace(p, "fall", h_view_fall_angles, 0);
-        h_view_sync();
-        h_view_damage(p);
-        h_frame();
-        h_view_check_trace(p, "damage", h_view_damage_angles[after], 0);
-        if (!h_view_bfg(p)) return;
-        h_view_check_trace(p, "BFG", h_view_bfg_angles[h_rate == 60], h_rate == 60 ? 3 : 0);
-        edict_t *blast = h_by_class("bfg blast", 0);
-        if (blast) G_FreeEdict(blast);
-    }
-}
-
-static void sc_t24_view_frozen(void)
-{
-    edict_t *p = h_view_player();
-    if (!p) return;
-    h_give(p, "quad damage", 0);
-    h_client_command(p, "use quad damage");
-    h_view_sync();
-    VectorSet(p->velocity, 180, 0, 0);
-    h_frame();
-    player_state_t *ps = &p->client->ps;
-    vec3_t kick, gun, offset;
-    VectorCopy(ps->kick_angles, kick);
-    VectorCopy(ps->gunangles, gun);
-    VectorCopy(ps->viewoffset, offset);
-    float bob = p->client->bobtime;
-    int frame = level.framenum, health = p->health;
-    unsigned quad = p->client->quad_framenum, air = p->air_finished_framenum;
-    CHECK(kick[PITCH] != 0 && gun[PITCH] != 0 && bob > 0 && quad > (unsigned)frame && air > (unsigned)frame,
-          "moving player has active speed tilt, bob, gun angle, quad and air");
-    p->waterlevel = 3;
-    p->watertype = CONTENTS_LAVA | CONTENTS_WATER;
-    h_view_pause(p);
-    int view_changed = 0, world_changed = 0;
-    for (int i = 0; i < h_rate; i++) {
-        h_frame();
-        view_changed += !VectorCompare(ps->kick_angles, kick) || !VectorCompare(ps->gunangles, gun) ||
-                        !VectorCompare(ps->viewoffset, offset) || p->client->bobtime != bob;
-        world_changed += level.framenum != frame || p->client->quad_framenum != quad ||
-                         p->air_finished_framenum != air || p->health != health;
-    }
-    CHECK(!view_changed, "speed tilt, bob and weapon angle stay frozen (%d changed ticks)", view_changed);
-    CHECK(!world_changed && tdm_match_status == MM_TIMEOUT, "powerup, air and environmental damage stay frozen (%d changed ticks)",
-          world_changed);
-    h_view_resume(p);
-    h_frames_n(h_div);
-    CHECK(p->health < health, "lava damages the player after resume");
-}
-#endif
-
-static void h_check_crush_log(int start, const char *expected)
-{
-    const char prefix[] = "Crush limiter: ";
-    int lines = 0, matches = 0;
-    for (int i = start; i < h_ndprints; i++) {
-        const char *text = h_dprints[i].text;
-        lines += !strncmp(text, prefix, sizeof(prefix) - 1);
-        matches += expected && !strcmp(text, expected);
-    }
-    CHECK(lines == (expected != NULL) && matches == lines, "crush log: %d lines, %d expected matches for %s",
-          lines, matches, expected ? expected : "no overflow");
-}
-
-static void sc_t24_crush_overflow_count(void)
-{
-    const char first_line[] = "Crush limiter: table full (64 pairs), limiting per victim\n";
-    h_scene_base();
-    h_start(h_ents);
-    edict_t *s1 = G_Spawn(), *s2 = G_Spawn(), *victim = G_Spawn();
-    h_crush_spawn_fill();
-    CHECK(h_crush_fill() == 64, "64 active pairs fit without overflow");
-    h_check_crush_log(0, NULL);
-
-    int start = h_ndprints, first, gap;
-    int hits = h_crush_run(s1, s2, victim, 3 * h_div, &first, &gap);
-    CHECK(first == 0 && hits == 3 && gap == h_div,
-          "fallback allows 3 hits at 100 ms intervals (hits %d)", hits);
-    h_check_crush_log(start, first_line);
-
-    start = h_ndprints;
-    ge->SpawnEntities("next", h_ents, "");
-    h_check_crush_log(start, "Crush limiter: overflow total on harness = 3\n");
-
-    start = h_ndprints;
-    s1 = G_Spawn();
-    victim = G_Spawn();
-    h_crush_spawn_fill();
-    CHECK(h_crush_fill() == 64 && G_CrushAllowed(s1, victim),
-          "first fallback hit is allowed on the new map");
-    h_check_crush_log(start, first_line);
-
-    start = h_ndprints;
-    ge->Shutdown();
-    h_check_crush_log(start, "Crush limiter: overflow total on next = 1\n");
-#ifdef HARNESS_OPENTDM
-    /* The engine reloads the module; the linked fixture keeps the old map pointer. */
-    level.entity_string = NULL;
-#endif
-    int restart = h_ndprints;
-    h_start(h_ents);
-    h_check_crush_log(restart, NULL);
-    ge->Shutdown();
-    h_check_crush_log(start, "Crush limiter: overflow total on next = 1\n");
-}
 
 enum { TOSS_FLOOR, TOSS_WALL, TOSS_CORNER, TOSS_STAIRS, TOSS_SCENES };
 enum { TOSS_STARTS = 6, TOSS_ARC_STEPS = 35, TOSS_MAX_HITS = 8 };
@@ -3324,19 +3731,34 @@ static void h_toss_explode(edict_t *ent)
     toss_events.think(ent);
 }
 
-static edict_t *h_toss_spawn(edict_t *player, int item, vec3_t start, const vec3_t velocity, int fuse)
+enum { H_TOSS_GRENADE, H_TOSS_ITEM, H_TOSS_DEBRIS, H_TOSS_HAND_GRENADE };
+
+static edict_t *h_toss_spawn(edict_t *player, int kind, vec3_t start, const vec3_t velocity, int fuse)
 {
     edict_t *obj;
-    if (item) {
+    if (kind == H_TOSS_ITEM) {
         obj = Drop_Item(player, FindItem("Shells"));
+    } else if (kind == H_TOSS_DEBRIS) {
+        obj = G_Spawn();
+        obj->movetype = MOVETYPE_BOUNCE;
+        obj->solid = SOLID_BBOX;
+        obj->clipmask = MASK_SHOT;
+        obj->owner = player;
+        obj->think = G_FreeEdict;
+        obj->nextthink = level.framenum + fuse * h_div;
+        VectorSet(obj->avelocity, 300, 300, 300);
     } else {
         vec3_t dir = { 1, 0, 0 };
 #ifdef HARNESS_OPENTDM
-        fire_grenade(player, start, dir, 120, 0, fuse / 10.0f, 160);
+        float timer = fuse / 10.0f;
 #else
-        fire_grenade(player, start, dir, 120, 0, fuse * h_div, 160);
+        int timer = fuse * h_div;
 #endif
-        obj = h_by_class("grenade", 0);
+        if (kind == H_TOSS_HAND_GRENADE)
+            fire_grenade2(player, start, dir, 125, 0, timer, 165, false);
+        else
+            fire_grenade(player, start, dir, 120, 0, timer, 160);
+        obj = h_by_class(kind == H_TOSS_HAND_GRENADE ? "hgrenade" : "grenade", 0);
     }
     if (!obj) imp_error("toss object did not spawn");
     VectorCopy(start, obj->s.origin);
@@ -3348,7 +3770,7 @@ static edict_t *h_toss_spawn(edict_t *player, int item, vec3_t start, const vec3
     toss_events.start = h_frames;
     toss_events.touch = obj->touch;
     obj->touch = h_toss_touch;
-    if (!item) {
+    if (obj->think && kind != H_TOSS_ITEM) {
         toss_events.think = obj->think;
         obj->think = h_toss_explode;
     }
@@ -3365,11 +3787,12 @@ static void sc_t24_toss_free(void)
         vec3_t start = { 0, 1000, 10000 }, velocity = { 400, 0, 300 };
         edict_t *obj = h_toss_spawn(player, item, start, velocity, 30);
         float error = 0;
+        int wait = h_grid_wait();
         for (int i = 0; i < h_rate; i++) {
             h_frame();
-            int step = i / h_div;
-            float t = (float)(i % h_div + 1) / h_div;
-            toss_point_t a = toss_free_reference[step], b = toss_free_reference[step + 1];
+            int step = item ? i / h_div : (i + h_div - wait) / h_div;
+            float t = item ? (float)(i % h_div + 1) / h_div : 0;
+            toss_point_t a = toss_free_reference[step], b = toss_free_reference[item ? step + 1 : step];
             toss_point_t expected = { a.x + t * (b.x - a.x), a.z + t * (b.z - a.z) };
             toss_point_t actual = { obj->s.origin[0], obj->s.origin[2] - start[2] };
             error = fmaxf(error, h_toss_error(actual, expected));
@@ -3396,7 +3819,7 @@ static edict_t *h_toss_bounce_scene(void)
     return h_join(0, "p1");
 }
 
-static edict_t *h_toss_throw(edict_t *player, int scene, int start, int fuse)
+static edict_t *h_toss_throw(edict_t *player, int scene, int start, int fuse, int kind)
 {
     vec3_t origin = { 0, 1000 + 600 * scene, 64 }, velocity = { 600, 0, 200 };
     if (scene == TOSS_CORNER) VectorSet(velocity, 500, 0, 0);
@@ -3405,7 +3828,7 @@ static edict_t *h_toss_throw(edict_t *player, int scene, int start, int fuse)
         VectorSet(origin, -16 + 2 * start, 2800, 300);
         VectorSet(velocity, 30 * (start + 1), 0, 0);
     }
-    return h_toss_spawn(player, 0, origin, velocity, fuse);
+    return h_toss_spawn(player, kind, origin, velocity, fuse);
 }
 
 static int h_toss_at_rest(const edict_t *obj)
@@ -3413,12 +3836,17 @@ static int h_toss_at_rest(const edict_t *obj)
     return obj->groundentity && VectorCompare(obj->velocity, vec3_origin);
 }
 
+static float h_toss_path_tolerance(void)
+{
+    return h_rate == 10 ? 0.0001f : 0.01f;
+}
+
 static float h_toss_tolerance(void)
 {
     return h_rate == 10 ? 0.0001f : 0.1f;
 }
 
-static void h_toss_check_hits(const toss_arc_t *ref, int steps)
+static void h_toss_check_hits(const toss_arc_t *ref, int steps, int first_step)
 {
     int count = 0;
     while (count < ref->count && ref->hits[count].tick <= steps) count++;
@@ -3427,8 +3855,9 @@ static void h_toss_check_hits(const toss_arc_t *ref, int steps)
         const toss_hit_t *got = &toss_events.hits[i], *want = &ref->hits[i];
         float error = h_toss_error(got->point, want->point);
         int boundary = want->tick * h_div;
-        CHECK(got->face == want->face && error <= h_toss_tolerance() &&
-              boundary - h_div < got->tick && got->tick <= boundary,
+        int on_time = first_step ? got->tick == first_step + boundary - h_div :
+                      boundary - h_div < got->tick && got->tick <= boundary;
+        CHECK(got->face == want->face && error <= h_toss_tolerance() && on_time,
               "hit %d: face %d/%d, position error %.5f, tick %d (10 Hz: %d)",
               i + 1, got->face, want->face, error, got->tick, boundary);
     }
@@ -3438,17 +3867,17 @@ static void h_toss_bounce_case(edict_t *player, int scene, int start, int steps)
 {
     int msgs = h_nmsgs, stop = 0;
     float path_error = 0;
-    edict_t *obj = h_toss_throw(player, scene, start, steps);
+    edict_t *obj = h_toss_throw(player, scene, start, steps, H_TOSS_GRENADE);
     float y = obj->s.origin[1];
-    int last = steps * h_div;
-    int limit = last + 1;
+    int first_step = h_grid_wait() + 1;
+    int limit = first_step + steps * h_div;
     const toss_arc_t *ref = &toss_reference[scene][start];
     for (int tick = 1; tick <= limit; tick++) {
         h_frame();
         if (!obj->inuse) break;
         if (!stop && h_toss_at_rest(obj)) stop = tick;
-        if (tick % h_div || tick > last) continue;
-        int node = tick / h_div;
+        if (tick < first_step || (tick - first_step) % h_div) continue;
+        int node = (tick - first_step) / h_div + 1;
         if (ref->stop && node > ref->stop) node = ref->stop;
         path_error = fmaxf(path_error, h_toss_error(h_toss_point(obj), ref->path[node - 1]));
         path_error = fmaxf(path_error, fabsf(obj->s.origin[1] - y));
@@ -3456,15 +3885,15 @@ static void h_toss_bounce_case(edict_t *player, int scene, int start, int steps)
     CHECK(!obj->inuse && toss_events.exploded == limit && h_explosions(msgs) == 1,
           "scene %d start %d fuse %.1fs: one explosion at tick %d (expected %d)",
           scene, start, steps / 10.0f, toss_events.exploded, limit);
-    int stop_boundary = ref->stop * h_div;
+    int stop_boundary = first_step + (ref->stop - 1) * h_div;
     int node = ref->stop && steps > ref->stop ? ref->stop : steps;
     float explosion_error = h_toss_error(toss_events.explosion, ref->path[node - 1]);
-    CHECK(path_error <= h_toss_tolerance() && explosion_error <= h_toss_tolerance(),
+    CHECK(path_error <= h_toss_path_tolerance() && explosion_error <= h_toss_tolerance(),
           "scene %d start %d: worst 100 ms position error %.5f; explosion error %.5f",
           scene, start, path_error, explosion_error);
-    CHECK(ref->stop && ref->stop <= steps ? stop_boundary - h_div < stop && stop <= stop_boundary : !stop,
-          "stop tick %d (10 Hz: %d, fuse boundary: %d)", stop, stop_boundary, last);
-    h_toss_check_hits(ref, steps);
+    CHECK(ref->stop && ref->stop <= steps ? stop == stop_boundary : !stop,
+          "stop tick %d (10 Hz: %d, fuse boundary: %d)", stop, stop_boundary, limit);
+    h_toss_check_hits(ref, steps, first_step);
     if (obj->inuse) G_FreeEdict(obj);
 }
 
@@ -3486,7 +3915,7 @@ static void sc_t24_toss_hold(void)
 {
     edict_t *player = h_toss_bounce_scene();
     const toss_arc_t *ref = &toss_reference[TOSS_WALL][0];
-    edict_t *obj = h_toss_throw(player, TOSS_WALL, 0, 60);
+    edict_t *obj = h_toss_throw(player, TOSS_WALL, 0, 60, H_TOSS_DEBRIS);
     int hit = 0, hold_end = 0, stop = 0, waiting = 0, moved = 0, still = 0;
     float path_error = 0;
     vec3_t impact = { 0 };
@@ -3517,15 +3946,15 @@ static void sc_t24_toss_hold(void)
     }
     CHECK((h_div == 1 || waiting > 0) && !moved && !still,
           "wait at impact until the step ends: %d waiting ticks, %d moved, %d late resumes", waiting, moved, still);
-    CHECK(ref->count >= 4 && path_error <= h_toss_tolerance(),
+    CHECK(ref->count >= 4 && path_error <= h_toss_path_tolerance(),
           "four or more impacts with aligned 100 ms positions (path error %.5f)", path_error);
     CHECK(stop > (ref->stop - 1) * h_div && stop <= ref->stop * h_div,
           "stop tick %d (10 Hz: %d)", stop, ref->stop * h_div);
-    h_toss_check_hits(ref, TOSS_ARC_STEPS);
+    h_toss_check_hits(ref, TOSS_ARC_STEPS, 0);
     G_FreeEdict(obj);
 
     vec3_t start = { 294, 1600, 200 }, velocity = { 600, 0, 0 };
-    obj = h_toss_spawn(player, 0, start, velocity, 30);
+    obj = h_toss_spawn(player, H_TOSS_DEBRIS, start, velocity, 30);
     h_frames_n(h_div);
     CHECK(toss_events.count == 1 && toss_events.hits[0].tick == 1 && !obj->groundentity,
           "spin setup: one wall impact in the first frame, hit tick %d count %d",
@@ -3536,18 +3965,17 @@ static void sc_t24_toss_hold(void)
           obj->s.angles[0], obj->s.angles[1], obj->s.angles[2]);
     G_FreeEdict(obj);
 
-    int msgs = h_nmsgs;
-    obj = h_toss_spawn(player, 0, start, velocity, 1);
-    /* At 60 Hz the fuse expires before the held step closes. */
+    obj = h_toss_spawn(player, H_TOSS_DEBRIS, start, velocity, 1);
+    /* At 60 Hz the debris expires before the held step closes. */
     int delay = h_div > 2 ? 2 : h_div;
     const toss_point_t wall_contact = { 299.969025f, 199.204132f };
     obj->nextthink -= h_div - delay;
     h_frames_n(delay + 1);
-    CHECK(!obj->inuse && toss_events.exploded == delay + 1 && h_explosions(msgs) == 1 &&
+    CHECK(!obj->inuse && toss_events.exploded == delay + 1 &&
           toss_events.count == 1 && toss_events.hits[0].tick == 1 &&
           h_toss_error(toss_events.explosion, wall_contact) <= h_toss_tolerance() &&
           fabsf(toss_events.explosion_y - start[1]) <= h_toss_tolerance(),
-          "fuse during wall hold: hit tick %d, exploded at tick %d (expected %d), position %.7f %.7f %.7f",
+          "expiry during wall hold: hit tick %d, freed at tick %d (expected %d), position %.7f %.7f %.7f",
           toss_events.hits[0].tick, toss_events.exploded, delay + 1,
           toss_events.explosion.x, toss_events.explosion_y, toss_events.explosion.z);
 }
@@ -3595,12 +4023,12 @@ static void sc_t24_toss_land(void)
     edict_t *player = h_join(0, "p1");
     int phases = 0;
     for (int i = 0; i < h_div; i++) {
-        /* Shift the launch by one world tick each time. Remove the support as soon as it catches the grenade. */
+        /* Shift the launch by one world tick each time. Remove the support as soon as it catches the debris. */
         while (h_frames % h_div != i) h_frame();
         edict_t *wall = h_by_model(va("*%d", i + 1));
         if (!wall) imp_error("toss support did not spawn");
         vec3_t start = { 300 * i, 2000, 196 }, zero = { 0 };
-        edict_t *obj = h_toss_spawn(player, 0, start, zero, 30);
+        edict_t *obj = h_toss_spawn(player, H_TOSS_DEBRIS, start, zero, 30);
         for (int tick = 0; tick < h_rate && !obj->groundentity; tick++) h_frame();
         CHECK(obj->groundentity == wall, "launch phase %d: landed on the support", i);
         phases |= 1 << (h_frames % h_div);
@@ -3629,10 +4057,10 @@ static void sc_t24_toss_wall_toggle(void)
 
     for (int phase = 0; phase < h_div; phase++) {
         vec3_t start = { 0, 2000, 196 }, zero = { 0 };
-        edict_t *obj = h_toss_spawn(player, 0, start, zero, 30);
+        edict_t *obj = h_toss_spawn(player, H_TOSS_DEBRIS, start, zero, 30);
         for (int tick = 0; tick < h_rate && !obj->groundentity; tick++)
             h_frame();
-        CHECK(obj->groundentity == wall, "phase %d: grenade rests on the wall", phase);
+        CHECK(obj->groundentity == wall, "phase %d: debris rests on the wall", phase);
         while (h_frames % h_div != phase)
             h_frame();
 
@@ -3641,7 +4069,7 @@ static void sc_t24_toss_wall_toggle(void)
         CHECK(wall->inuse && wall->solid == SOLID_NOT, "phase %d: wall switched off without freeing it", phase);
         h_frame();
         CHECK(!obj->groundentity && obj->s.origin[2] < z,
-              "phase %d: grenade falls on the first tick after wall toggle (height change %.6f)",
+              "phase %d: debris falls on the first tick after wall toggle (height change %.6f)",
               phase, obj->s.origin[2] - z);
         G_FreeEdict(obj);
         wall->use(wall, player, player);
@@ -3656,7 +4084,7 @@ static void sc_t24_toss_edge(void)
     h_start(h_ents);
     edict_t *player = h_join(0, "p1");
     vec3_t start = { 0, 2000, 199.99996948242188f }, zero = { 0 };
-    edict_t *obj = h_toss_spawn(player, 0, start, zero, 30);
+    edict_t *obj = h_toss_spawn(player, H_TOSS_DEBRIS, start, zero, 30);
     h_frames_n(h_div);
     CHECK(toss_events.count == 1 && toss_events.hits[0].face == 2 && obj->groundentity == EDICT(0) &&
           fabsf(obj->s.origin[2] - 192.03125f) <= H_EPS,
@@ -3683,9 +4111,9 @@ static void sc_t24_toss_outer_corner(void)
     h_start(h_ents);
     edict_t *player = h_join(0, "p1");
     vec3_t start = { 1990, -10, 128 }, velocity = { 200, 199.9998f, 0 };
-    edict_t *obj = h_toss_spawn(player, 0, start, velocity, 30);
+    edict_t *obj = h_toss_spawn(player, H_TOSS_DEBRIS, start, velocity, 30);
     CHECK(VectorCompare(obj->mins, vec3_origin) && VectorCompare(obj->maxs, vec3_origin),
-          "outer corner fixture uses a point grenade");
+          "outer corner fixture uses a point debris");
     obj->touch = h_outer_corner_touch;
     h_frames_n(h_div);
     CHECK(toss_events.count == 1 && h_outer_corner_hit == EDICT(0) && h_outer_corner_normal[0] == 0 &&
@@ -3697,10 +4125,10 @@ static void sc_t24_toss_outer_corner(void)
           obj->velocity[0], obj->velocity[1], obj->velocity[2], toss_events.count);
     G_FreeEdict(obj);
 
-    // At 10 and 20 Hz, the grenade reaches the corner on the first tick.
+    // At 10 and 20 Hz, the debris reaches the corner on the first tick.
     if (h_div <= 2)
         return;
-    obj = h_toss_spawn(player, 0, start, velocity, 30);
+    obj = h_toss_spawn(player, H_TOSS_DEBRIS, start, velocity, 30);
     obj->touch = h_outer_corner_touch;
     h_frame();
     edict_t *blocker = G_Spawn();
@@ -3716,12 +4144,41 @@ static void sc_t24_toss_outer_corner(void)
     G_FreeEdict(obj);
     G_FreeEdict(blocker);
 
-    obj = h_toss_spawn(player, 0, start, velocity, 30);
+    obj = h_toss_spawn(player, H_TOSS_DEBRIS, start, velocity, 30);
     h_frame();
     obj->velocity[1] = 0;
     h_frames_n(h_div - 1);
     CHECK(!toss_events.count && obj->s.origin[0] > 2000 && obj->s.origin[1] < 0,
-          "changing velocity between ticks lets the grenade miss the world corner");
+          "changing velocity between ticks lets the debris miss the world corner");
+}
+
+static void sc_t24_grid_solid(void)
+{
+    h_scene_base();
+    h_add_world(100, 900, 0, 500, 1100, 256);
+    h_start(h_ents);
+    edict_t *player = h_join(0, "p1");
+    for (int bugs = 0; bugs <= 2; bugs += 2) {
+        gi.cvar_forceset("g_bugs", va("%d", bugs));
+        for (int phase = 0; phase < h_div; phase++) {
+            h_frames_n((h_grid_wait() + phase) % h_div);
+            int wait = h_grid_wait(), msg = h_nmsgs;
+            vec3_t start = { 200, 1000, 100 }, dir = { 1, 0, 0 };
+            fire_rocket(player, start, dir, 100, 650, 120, 120);
+#ifdef HARNESS_OPENTDM
+            int creation_hit = bugs < 2;
+#else
+            int creation_hit = 0;
+#endif
+            CHECK(h_explosions(msg) == creation_hit, "g_bugs %d phase %d: explosion in creation command", bugs, phase);
+            h_frames_n(wait);
+            CHECK(h_explosions(msg) == creation_hit, "g_bugs %d phase %d: no explosion while waiting for grid", bugs, phase);
+            h_frame();
+            CHECK(h_explosions(msg) == (bugs < 2), "g_bugs %d phase %d: explosion by the first grid step", bugs, phase);
+            edict_t *rocket = h_by_class("rocket", 0);
+            if (rocket) G_FreeEdict(rocket);
+        }
+    }
 }
 
 static void sc_t24_toss_drop(void)
@@ -3738,7 +4195,7 @@ static void sc_t24_toss_drop(void)
         for (int platform = 0; platform <= 1; platform++)
             for (int i = 0; i < (int)(sizeof(heights) / sizeof(heights[0])); i++) {
                 vec3_t start = { platform ? 8 : 264, 2000, 64 + heights[i] }, zero = { 0 };
-                edict_t *obj = h_toss_spawn(player, item, start, zero, 30);
+                edict_t *obj = h_toss_spawn(player, item ? H_TOSS_ITEM : H_TOSS_DEBRIS, start, zero, 30);
                 obj->s.origin[2] -= obj->mins[2];
                 gi.linkentity(obj);
                 h_frames_n(3 * h_rate / 2);
@@ -3747,7 +4204,7 @@ static void sc_t24_toss_drop(void)
                 /* A classic step that ends exactly on a face can already miss it at 10 Hz. */
                 if (h_rate == 10 || toss_drop_reference[i])
                     CHECK(landed == toss_drop_reference[i],
-                          "%s +%d on %s: landed %d (10 Hz: %d)", item ? "item" : "grenade",
+                          "%s +%d on %s: landed %d (10 Hz: %d)", item ? "item" : "debris",
                           heights[i], platform ? "platform" : "brush", landed, toss_drop_reference[i]);
                 G_FreeEdict(obj);
             }
@@ -3755,7 +4212,7 @@ static void sc_t24_toss_drop(void)
 #else
 
 static struct {
-    int count;
+    int count, impulses;
     toss_point_t first;
     void (*touch)(edict_t *, edict_t *, cplane_t *, csurface_t *);
 } toss_pad;
@@ -3766,7 +4223,10 @@ static void h_toss_pad_touch(edict_t *self, edict_t *other, cplane_t *plane, csu
         if (!toss_pad.count) toss_pad.first = h_toss_point(other);
         toss_pad.count++;
     }
+    vec3_t before;
+    VectorCopy(other->velocity, before);
     toss_pad.touch(self, other, plane, surf);
+    toss_pad.impulses += !VectorCompare(before, other->velocity);
 }
 
 static void sc_t24_toss_pad(void)
@@ -3780,31 +4240,79 @@ static void sc_t24_toss_pad(void)
     }
     h_start(h_ents);
     edict_t *player = h_join(0, "p1");
-    for (int i = 0; i < 4; i++) {
-        int item = i == 3, lane = item ? 0 : i;
+    static const int cases[][3] = {
+        { H_TOSS_GRENADE, 0, 0 }, { H_TOSS_GRENADE, 1, 1 }, { H_TOSS_GRENADE, 2, 2 },
+        { H_TOSS_ITEM, 0, 3 }, { H_TOSS_DEBRIS, 1, 1 }, { H_TOSS_HAND_GRENADE, 0, 4 }
+    };
+    for (int i = 0; i < (int)(sizeof(cases) / sizeof(cases[0])); i++) {
+        int kind = cases[i][0], lane = cases[i][1], item = kind == H_TOSS_ITEM;
         edict_t *trigger = h_by_model(va("*%d", lane + 1));
         if (!trigger || !trigger->touch) imp_error("trigger_push did not spawn");
-        toss_pad.count = 0;
+        toss_pad.count = toss_pad.impulses = 0;
         toss_pad.touch = trigger->touch;
         trigger->touch = h_toss_pad_touch;
 
         vec3_t start = { 0, 1000 + 500 * lane, lane == 1 ? 200 : 64 };
         vec3_t velocity = { 600, 0, lane == 1 ? 0 : 200 };
-        edict_t *obj = h_toss_spawn(player, item, start, velocity, 50);
+        edict_t *obj = h_toss_spawn(player, kind, start, velocity, 50);
         if (item) obj->s.origin[2] -= obj->mins[2];
         gi.linkentity(obj);
         for (int tick = 0; tick < 4 * h_rate && !h_toss_at_rest(obj); tick++) h_frame();
         CHECK(h_toss_at_rest(obj), "pad case %d: object came to rest", i);
-        const toss_pad_ref_t *ref = &toss_pad_reference[i];
+        const toss_pad_ref_t *ref = &toss_pad_reference[cases[i][2]];
         float entry_error = toss_pad.count ? h_toss_error(toss_pad.first, ref->entry) : 0;
         float stop_error = h_toss_error(h_toss_point(obj), ref->stop);
         CHECK(toss_pad.count == ref->count && entry_error <= h_toss_tolerance() &&
-              (item || stop_error <= h_toss_tolerance()),
+              (item || kind == H_TOSS_HAND_GRENADE || stop_error <= h_toss_tolerance()),
               "pad case %d: %d touches (10 Hz: %d), entry error %.5f, stop error %.5f",
               i, toss_pad.count, ref->count, entry_error, stop_error);
+        CHECK(toss_pad.impulses == (kind == H_TOSS_GRENADE ? ref->count : 0),
+              "pad case %d: launcher grenade only gets a push (got %d impulses)", i, toss_pad.impulses);
         trigger->touch = toss_pad.touch;
         G_FreeEdict(obj);
     }
+}
+
+static void h_grid_use_blaster(edict_t *caller)
+{
+    edict_t *shooter = caller->enemy;
+    shooter->use(shooter, caller, caller);
+}
+
+static void sc_t24_grid_mapblaster(void)
+{
+    h_scene_base();
+    h_add_world(70, 936, 0, 120, 1064, 256);
+    h_ent("{\n\"classname\" \"target_blaster\"\n\"origin\" \"0 1000 100\"\n\"speed\" \"300\"\n}\n");
+    h_start(h_ents);
+    edict_t *shooter = h_by_class("target_blaster", 0);
+    if (!shooter) imp_error("target_blaster missing");
+
+    edict_t *slot = G_Spawn(), *caller = G_Spawn();
+    G_FreeEdict(slot);
+    caller->enemy = shooter;
+    caller->think = h_grid_use_blaster;
+    caller->nextthink = level.framenum + 1;
+    h_frames_n(2);
+    edict_t *bolt = h_by_class("bolt", 0);
+    CHECK(bolt == slot && bolt && bolt->s.origin[0] == 0, "map blaster shot takes a passed slot and has not moved");
+    if (!bolt) return;
+    CHECK(!!(bolt->svflags & SVF_NOCLIENT) == (h_div > 1), "visibility of a map bolt in its creation frame");
+    h_frames_n(h_grid_wait());
+    CHECK(bolt->inuse && bolt->s.origin[0] == 0, "map bolt waits for its first grid step");
+    h_frame();
+    CHECK(bolt->inuse && !(bolt->svflags & SVF_NOCLIENT) && fabsf(bolt->s.origin[0] - 30) < H_EPS,
+          "map bolt becomes visible 30 units along its path on the first grid step (x %g)", bolt->s.origin[0]);
+    h_frames_n(h_div);
+    CHECK(bolt->inuse && fabsf(bolt->s.origin[0] - 60) < H_EPS, "map bolt travels 60 units in two steps");
+    h_frames_n(h_div - 1);
+    CHECK(bolt->inuse, "map bolt has not touched the wall before the third grid step");
+    h_frame();
+    CHECK(!bolt->inuse, "map bolt touches the wall on the third grid step");
+    CHECK(!bolt->grid_move && !bolt->grid_frame && VectorCompare(bolt->grid_from, vec3_origin) &&
+          VectorCompare(bolt->grid_from_angles, vec3_origin), "freeing the projectile clears its grid state");
+    edict_t *reuse = G_Spawn();
+    CHECK(reuse == bolt && !(reuse->svflags & SVF_NOCLIENT), "a reused projectile slot is visible immediately");
 }
 
 static void sc_t24_toss_projectile(void)
@@ -3813,45 +4321,56 @@ static void sc_t24_toss_projectile(void)
     h_start(h_ents);
     edict_t *player = h_join(0, "p1");
     for (int rocket = 0; rocket <= 1; rocket++) {
-        vec3_t start, dir = { 1, 0, 0 };
-        VectorCopy(player->s.origin, start);
-        start[2] += 20;
-        if (rocket) fire_rocket(player, start, dir, 100, 650, 120, 120);
-        else fire_blaster(player, start, dir, 15, 1000, EF_BLASTER, false);
-        edict_t *obj = h_by_class(rocket ? "rocket" : "bolt", 0);
-        if (!obj) imp_error("projectile did not spawn");
-        float error = 0;
-        for (int i = 1; i <= h_rate; i++) {
-            h_frame();
-            vec3_t point, velocity = { toss_projectile_speed[rocket], 0, 0 };
-            VectorMA(start, (float)i / h_rate, velocity, point);
-            vec3_t delta;
-            VectorSubtract(point, obj->s.origin, delta);
-            error = fmaxf(error, VectorLength(delta));
-            VectorSubtract(velocity, obj->velocity, delta);
-            error = fmaxf(error, VectorLength(delta));
+        for (int phase = 0; phase < h_div; phase++) {
+            h_frames_n((h_grid_wait() + phase) % h_div);
+            int wait = h_grid_wait();
+            vec3_t start, dir = { 1, 0, 0 };
+            VectorCopy(player->s.origin, start);
+            start[2] += 20;
+            if (rocket) fire_rocket(player, start, dir, 100, 650, 120, 120);
+            else fire_blaster(player, start, dir, 15, 1000, EF_BLASTER, false);
+            edict_t *obj = h_by_class(rocket ? "rocket" : "bolt", 0);
+            if (!obj) imp_error("projectile did not spawn");
+            float error = 0;
+            for (int tick = 0; tick < h_rate; tick++) {
+                h_frame();
+                vec3_t point, velocity = { toss_projectile_speed[rocket], 0, 0 };
+                int step = (tick + h_div - wait) / h_div;
+                VectorMA(start, step * 0.1f, velocity, point);
+                vec3_t delta;
+                VectorSubtract(point, obj->s.origin, delta);
+                error = fmaxf(error, VectorLength(delta));
+                VectorSubtract(velocity, obj->velocity, delta);
+                error = fmaxf(error, VectorLength(delta));
+            }
+            CHECK(obj->inuse && error <= 0.01f, "%s phase %d: worst grid position or velocity error %.5f",
+                  rocket ? "rocket" : "blaster", phase, error);
+            G_FreeEdict(obj);
         }
-        CHECK(obj->inuse && error <= 0.01f, "%s: worst position or velocity error %.5f",
-              rocket ? "rocket" : "blaster", error);
-        G_FreeEdict(obj);
     }
 }
 
 #ifdef HARNESS_OPENTDM
-static void h_toss_timeout_run(edict_t *player, int pause, toss_arc_t *arc)
+static void h_toss_timeout_run(edict_t *player, int kind, int pause, toss_arc_t *arc)
 {
+    if (kind == H_TOSS_GRENADE) h_real_phase(0);
     vec3_t start = { 0, 1000, 64 }, velocity = { 600, 0, 200 };
-    edict_t *obj = h_toss_spawn(player, 0, start, velocity, 60);
+    edict_t *obj = h_toss_spawn(player, kind, start, velocity, 60);
+    int freeze = -1;
     for (int tick = 1; tick <= TOSS_ARC_STEPS * h_div; tick++) {
         if (pause && tick == h_div + 2) {
+            h_client_command(player, "time");
+            CHECK(tdm_match_status == MM_TIMEOUT, "entered timeout mid-flight");
+            freeze = (level.realframenum + h_div - 1) / h_div * h_div;
+        }
+        if (level.realframenum == freeze) {
+            h_frame();
             int match_frame = level.framenum;
             vec3_t origin, speed;
             VectorCopy(obj->s.origin, origin);
             VectorCopy(obj->velocity, speed);
-            h_client_command(player, "time");
-            CHECK(tdm_match_status == MM_TIMEOUT, "entered timeout mid-flight");
             int budget = 15 * h_rate, frozen = 1;
-            for (int i = 0; i < budget && tdm_match_status == MM_TIMEOUT; i++) {
+            for (int i = 1; i < budget && tdm_match_status == MM_TIMEOUT; i++) {
                 if (i == h_rate) h_client_command(player, "time");
                 h_frame();
                 if (tdm_match_status == MM_TIMEOUT)
@@ -3859,29 +4378,25 @@ static void h_toss_timeout_run(edict_t *player, int pause, toss_arc_t *arc)
                               VectorCompare(obj->velocity, speed) && level.framenum == match_frame;
             }
             CHECK(frozen && tdm_match_status == MM_PLAYING, "trajectory and match clock stayed frozen until resume");
+            h_frames_n(h_div - 1);
             int paused = h_frames - toss_events.start - (tick - 1);
             toss_events.start += paused;
-            /* The resume status is updated after the entity loop. */
-            h_frame();
-        } else {
-            h_frame();
         }
+        h_frame();
         if (tick % h_div == 0) arc->path[tick / h_div - 1] = h_toss_point(obj);
         if (!arc->stop && h_toss_at_rest(obj)) arc->stop = tick;
     }
+    CHECK(obj->inuse && !toss_events.exploded, "object is live throughout the timeout arc");
     arc->count = toss_events.count;
     memcpy(arc->hits, toss_events.hits, sizeof(arc->hits));
     G_FreeEdict(obj);
 }
 
-static void sc_t24_toss_timeout(void)
+static void h_check_timeout_arc(edict_t *player, int kind, const char *name)
 {
-    edict_t *a, *b;
-    h_tdm_pair(&a, &b);
-    if (!h_tdm_start(a, b)) return;
     toss_arc_t continuous = { 0 }, paused = { 0 };
-    h_toss_timeout_run(a, 0, &continuous);
-    h_toss_timeout_run(a, 1, &paused);
+    h_toss_timeout_run(player, kind, 0, &continuous);
+    h_toss_timeout_run(player, kind, 1, &paused);
     float error = 0;
     for (int i = 0; i < TOSS_ARC_STEPS; i++)
         error = fmaxf(error, h_toss_error(continuous.path[i], paused.path[i]));
@@ -3892,7 +4407,16 @@ static void sc_t24_toss_timeout(void)
                h_toss_error(before->point, after->point) <= H_EPS;
     }
     CHECK(same && continuous.stop && continuous.stop == paused.stop && error <= H_EPS,
-          "resume follows the same arc, impacts and stop as uninterrupted play (path error %.5f)", error);
+          "%s follows the same arc, impacts and stop as uninterrupted play (path error %.5f)", name, error);
+}
+
+static void sc_t24_toss_timeout(void)
+{
+    edict_t *a, *b;
+    h_tdm_pair(&a, &b);
+    if (!h_tdm_start(a, b)) return;
+    h_check_timeout_arc(a, H_TOSS_DEBRIS, "debris");
+    h_check_timeout_arc(a, H_TOSS_GRENADE, "grenade");
 }
 #endif
 #endif
@@ -3946,16 +4470,17 @@ static void h_t23_countdown(edict_t *a, edict_t *b)
     int sounds = h_nsounds;
     bp = h_nbprints;
     start = h_frames;
+    int countdown = (h_div - h_frames % h_div) % h_div + 15 * h_rate;
     h_client_command(b, "ready");
     h_t23_announcement("countdown", "Starting countdown", bp, start, 0);
     CHECK(tdm_match_status == MM_COUNTDOWN, "match enters countdown");
-    h_frames_n(15 * h_rate + 1);
-    h_t23_announcement("fight", "Fight!", bp, start, 15 * h_rate);
+    h_frames_n(countdown + 1);
+    h_t23_announcement("fight", "Fight!", bp, start, countdown);
     int idx = imp_soundindex("world/10_0.wav");
     int n = h_count_sounds(idx, sounds), at = -1;
     for (int i = sounds; i < h_nsounds; i++)
         if (h_sounds_log[i].soundindex == idx) at = h_sounds_log[i].frame;
-    CHECK(n == 1 && start + 15 * h_rate - at == 104 * h_rate / 10,
+    CHECK(n == 1 && start + countdown - at == 104 * h_rate / 10,
           "countdown sound 10.4 s before Fight! (got %d sounds at tick %d)", n, at - start);
     h_t23_sample("countdown_sound", at - start, n);
     n = h_announced(bp, CS_TDM_TIMELIMIT_STRING, "countdown");
@@ -4085,8 +4610,9 @@ static void sc_t23_timeout_clocks(void)
     h_frames_n(h_rate);
     start = h_frames;
     bp = h_nbprints;
+    int resume_pad = (h_div - level.realframenum % h_div) % h_div;
     h_view_resume(b);
-    h_t23_announcement("manual_fight", "Fight!", bp, start, 104 * h_rate / 10);
+    h_t23_announcement("manual_fight", "Fight!", bp, start, resume_pad + 104 * h_rate / 10);
 
     unsigned code = a->client->resp.teamplayerinfo->joincode;
     h_place(b, 800, 0, 24);
@@ -4097,6 +4623,7 @@ static void sc_t23_timeout_clocks(void)
     h_frames_n(h_rate);
     start = h_frames;
     bp = h_nbprints;
+    resume_pad = (h_div - level.realframenum % h_div) % h_div;
     char userinfo[MAX_INFO_STRING] = "\\name\\p1\\skin\\male/grunt";
     CHECK(ge->ClientConnect(a, userinfo), "returning duelist connects");
     h_t23_userinfo(a, "p1", code);
@@ -4105,7 +4632,7 @@ static void sc_t23_timeout_clocks(void)
     CHECK(a->client->pers.team == TEAM_A && recovered == before,
           "join code restores player and players time (%d -> %d)", before, recovered);
     h_t23_wait_resume();
-    h_t23_announcement("duel_reconnect", "Fight!", bp, start, 104 * h_rate / 10);
+    h_t23_announcement("duel_reconnect", "Fight!", bp, start, resume_pad + 104 * h_rate / 10);
     h_t23_sample("recovered_players", 0, recovered);
     start = h_frames;
     bp = h_nbprints;
@@ -4355,13 +4882,15 @@ static void sc_t23_vote_window(void)
     CHECK(strstr(h_cs_at(CS_TDM_VOTE_STRING, h_frames - 1), "Yes: 1 (2) No: 1 [03]"),
           "vote HUD shows a tied ballot after one second");
 
+    int freeze = h_frames + (h_div - level.realframenum % h_div) % h_div;
     h_client_command(a, "time");
     CHECK(tdm_match_status == MM_TIMEOUT, "vote has an active timeout");
     h_frames_n(5 * h_rate);
     CHECK(vote.active && strstr(h_cs_at(CS_TDM_VOTE_STRING, h_frames - 1), "[03]"),
           "vote HUD and expiry freeze in timeout");
+    int resume = h_frames + (h_div - level.realframenum % h_div) % h_div + 104 * h_rate / 10;
     h_view_resume(a);
-    int frozen = h_frames - start - (h_rate + 1) - 1;
+    int frozen = resume - freeze;
     h_frames_n(3 * h_rate);
     h_t23_announcement("expired", "Vote failed.", prints, start, 4 * h_rate + frozen);
     CHECK(!vote.active && !*h_cs_at(CS_TDM_VOTE_STRING, h_frames - 1), "vote HUD clears at expiry");
@@ -4408,6 +4937,8 @@ static void sc_t23_vote_window(void)
     h_frames_n(15 * h_rate);
     h_client_command(a, "vote timelimit 1");
     h_client_command(b, "vote yes");
+    h_frames_n((h_div - h_frames % h_div) % h_div);
+    CHECK(tdm_match_status == MM_PLAYING, "shortened timelimit leaves play active before the grid frame");
     h_frame();
     CHECK(g_match_time->value == 60 && tdm_match_status == MM_SCOREBOARD,
           "shortened timelimit that has already elapsed ends the match");
@@ -4467,7 +4998,9 @@ static void sc_t23_flood(void)
         h_frames_n(2 * h_rate);
     }
     CHECK(waves == 2 && h_t23_print(a, "wave 1", wave_lock), "third wave starts a one minute lock");
-#ifndef HARNESS_OPENTDM
+#ifdef HARNESS_OPENTDM
+    int wave_deadline = level.framenum + 60 * h_rate;
+#else
     int wave_deadline = h_frames + 60 * h_rate;
 #endif
     edict_t *viewer = h_connect(2, "reader");
@@ -4503,7 +5036,7 @@ static void sc_t23_flood(void)
 #ifdef HARNESS_OPENTDM
     h_view_resume(a);
     CHECK(h_t23_print(b, "say after-resume", ": after-resume"), "chat remains unlocked after resume");
-    h_frames_n(56 * h_rate - 2);
+    h_frames_n(wave_deadline - 1 - level.framenum);
 #else
     h_frames_n(wave_deadline - 1 - h_frames);
 #endif
@@ -4530,15 +5063,18 @@ static void sc_t23_mute(void)
     CHECK(h_t23_print(b, "say capped", "muted for 3600 more seconds"), "cap sets a one-hour deadline");
     CHECK(h_t23_print(admin, "mute 1 1", "muted for 1 minute"), "one-minute mute set");
     int start = h_frames;
+    int deadline = level.framenum + 60 * h_rate;
     h_frames_n(2 * h_rate);
     int texts = h_ntexts;
     CHECK(h_t23_print(b, "say before-pause", "muted for 58 more seconds") &&
           !h_text_to(a, 0, ": before-pause", texts), "muted message is refused and not delivered before timeout");
+    int freeze = (level.framenum + h_div - 1) / h_div * h_div;
     h_client_command(a, "time");
     h_frames_n(3 * h_rate);
-    CHECK(h_t23_print(b, "say in-pause", "muted for 58 more seconds"), "mute display freezes in timeout");
+    CHECK(h_t23_print(b, "say in-pause", va("muted for %d more seconds", (deadline - freeze) / h_rate)),
+          "mute display freezes with the match clock on the grid");
     h_view_resume(a);
-    h_frames_n(58 * h_rate - 2);
+    h_frames_n(deadline - 1 - level.framenum);
     CHECK(h_t23_print(b, "say early", "You are muted"), "chat blocked one match step before mute ends");
     h_frame();
     texts = h_ntexts;
@@ -4637,6 +5173,11 @@ static edict_t *h_t23_item(const char *name)
     return item && item->touch ? item : NULL;
 }
 
+static int h_to_grid(void)
+{
+    return G_WindowFrame(level.framenum) - level.framenum;
+}
+
 static void sc_t23_item_respawn(void)
 {
     static const struct { const char *name; const char *cvar; int seconds; } items[] = {
@@ -4688,7 +5229,8 @@ static void sc_t23_item_respawn(void)
     for (unsigned i = 0; i < sizeof(items) / sizeof(items[0]); i++) {
         edict_t *item = h_t23_item(items[i].name);
         if (!item) return;
-        int start = h_frames, paused = 0;
+        h_real_phase(1 % h_div);
+        int start = h_frames + h_to_grid(), paused = 0;
         a->health = i == 5 ? 2 : 50; /* mega takes just two one-point decay steps */
         int pickup = CS_ITEMS + ITEM_INDEX(item->item);
         item->touch(item, a, NULL, NULL);
@@ -4696,15 +5238,16 @@ static void sc_t23_item_respawn(void)
               h_stat(a, STAT_PICKUP_STRING) == pickup, "%s pickup hides the item", items[i].name);
 #ifdef HARNESS_OPENTDM
         if (i == 0) {
+            int freeze = h_frames + (h_div - level.realframenum % h_div) % h_div;
             h_client_command(a, "time");
             h_frames_n(4 * h_rate);
             CHECK(tdm_match_status == MM_TIMEOUT && item->solid == SOLID_NOT, "item stays hidden across its wall-time deadline");
             h_view_resume(a);
-            paused = h_frames - start - 1;
+            paused = h_frames - freeze - 1;
         }
 #endif
         if (i == 5) {
-            h_frames_n(5 * h_rate);
+            h_frames_n(start + 5 * h_rate - h_frames);
             CHECK(a->health == 102, "mega health holds for five seconds");
             h_frame();
             CHECK(a->health == 101, "mega health starts one-point decay");
@@ -4743,34 +5286,39 @@ static void sc_t23_dropped_items(void)
     h_tdm_pair(&a, &b);
     if (!h_t23_start(a, b)) return;
     gitem_t *item = (gitem_t *)FindItem("Shells");
+    h_real_phase(1 % h_div);
     edict_t *drop = Drop_Item(a, item);
     drop->movetype = MOVETYPE_NONE;
-    int start = h_frames, index = ITEM_INDEX(item), initial = a->client->inventory[index];
-    h_frames_n(h_rate);
+    int start = h_frames + h_to_grid(), index = ITEM_INDEX(item), initial = a->client->inventory[index];
+    h_frames_n(start + h_rate - h_frames);
     drop->touch(drop, a, NULL, NULL);
     CHECK(drop->inuse && a->client->inventory[index] == initial, "owner blocked before pickup opens");
     h_frame();
-    drop->touch(drop, a, NULL, NULL);
+    if (drop->inuse && drop->touch)
+        drop->touch(drop, a, NULL, NULL);
     CHECK(!drop->inuse && a->client->inventory[index] > initial, "owner can pick up after one second");
     h_t23_sample("owner_pickup", h_frames - start - 1, a->client->inventory[index] - initial);
 
+    h_real_phase(1 % h_div);
     drop = Drop_Item(a, item);
     drop->movetype = MOVETYPE_NONE;
-    start = h_frames;
-    h_frames_n(30 * h_rate);
+    start = h_frames + h_to_grid();
+    h_frames_n(start + 30 * h_rate - h_frames);
     CHECK(drop->inuse, "untouched drop still exists one step before 30 s");
     h_frame();
     CHECK(!drop->inuse, "untouched drop disappears at 30 s");
     h_t23_sample("drop_expired", h_frames - start - 1, !drop->inuse);
 
+    h_real_phase(0);
     a->client->quad_framenum = level.framenum + 2 * h_rate;
     h_hit(a, 200);
     drop = G_Find(NULL, FOFS(classname), "item_quad");
     CHECK(drop && (drop->spawnflags & DROPPED_PLAYER_ITEM), "death drops a quad with two seconds left");
     if (!drop) return;
     start = h_frames;
-    h_frames_n(h_rate / 2);
+    h_frames_n(h_rate / 2 + 1 % h_div);
     drop->touch(drop, b, NULL, NULL);
+    h_real_phase(0);
     h_frame();
     CHECK(!drop->inuse && (b->s.effects & EF_QUAD), "pickup transfers dropped quad to opponent");
     h_frames_n(start + 2 * h_rate - h_frames);
@@ -4779,7 +5327,8 @@ static void sc_t23_dropped_items(void)
     h_frame();
     CHECK(h_stat(b, STAT_TIMER_ICON) != icon && !(b->s.effects & EF_QUAD), "transferred quad ends on the original deadline");
     h_t23_sample("inherited_quad", h_frames - start - 1, !!(b->s.effects & EF_QUAD));
-    b->client->quad_framenum = level.framenum + h_rate;
+    h_real_phase(1 % h_div);
+    b->client->quad_framenum = level.framenum + h_to_grid() + h_rate;
     h_hit(b, 200);
     CHECK(!G_Find(NULL, FOFS(classname), "item_quad"), "no drop with exactly one second left");
     h_t23_sample("short_quad_drop", 0, G_Find(NULL, FOFS(classname), "item_quad") != NULL);
@@ -4841,9 +5390,10 @@ static void sc_t23_powerup_lifetime(void)
 #endif
     int invul_sound = imp_soundindex("items/protect4.wav");
     for (unsigned i = 0; i < sizeof(t23_powerups) / sizeof(t23_powerups[0]); i++) {
-        int start = h_frames, icon = imp_imageindex(t23_powerups[i].icon);
+        h_real_phase(1 % h_div);
+        int start = h_frames + h_to_grid(), icon = imp_imageindex(t23_powerups[i].icon);
         h_t23_use_powerup(a, i);
-        h_frame();
+        h_frames_n(start + 1 - h_frames);
         CHECK(h_stat(a, STAT_TIMER) == 30 && h_stat(a, STAT_TIMER_ICON) == icon,
               "%s starts with 30 s and its icon", t23_powerups[i].name);
         h_frames_n(h_rate - 1);
@@ -4897,6 +5447,7 @@ static void sc_t23_powerup_lifetime(void)
             CHECK(a->health < hp, "expired invulnerability no longer blocks damage");
         }
     }
+    h_real_phase(0);
     h_t23_use_powerup(a, 0);
     int both = h_frames;
     h_t23_use_powerup(a, 1);
@@ -4930,6 +5481,7 @@ static void sc_t23_powerup_warning(void)
         int power = i % 4;
         int sound = imp_soundindex(t23_powerups[power].warning);
         for (int k = 0; k < 4; k++) *ends[k] = 0;
+        h_real_phase(0);
         int start = h_frames, mark = h_nsounds;
         *ends[power] = level.framenum + 34 * h_rate / 10;
         if (i == 4) *ends[2] = *ends[0];
@@ -4955,6 +5507,7 @@ static void sc_t23_powerup_warning(void)
               "powerup %d has no additional warnings through natural expiry", i);
 
 #ifdef HARNESS_OPENTDM
+        while (h_frames % h_div) h_frame();
         *ends[power] = level.framenum + 3 * h_rate;
         if (i == 4) *ends[2] = *ends[0];
         mark = h_nsounds;
@@ -4967,8 +5520,9 @@ static void sc_t23_powerup_warning(void)
               cl->ps.blend[3] > 0, "powerup %d stays active and quiet past its wall-time deadline", i);
         h_t23_sample(va("silent_%d", i), h_frames - start, during);
         h_view_resume(a);
+        int resume = h_frames - 1;
         h_frames_n(h_div);
-        CHECK(h_count_sounds(sound, mark) <= 1, "coincident warning and timeout limits powerup %d to one sound", i);
+        h_check_powerup_warning_resume(sound, mark, resume);
 #endif
     }
 }
@@ -5034,7 +5588,9 @@ static void sc_t23_item_hud(void)
 #endif
 
     h_give(p, "quad damage", 0);
+    h_real_phase(1 % h_div);
     start = h_frames;
+    int pickup_deadline = start + h_to_grid() + 3 * h_rate;
 #ifdef HARNESS_OPENTDM
     mark = h_nmsgs;
 #endif
@@ -5050,7 +5606,7 @@ static void sc_t23_item_hud(void)
     h_client_command(p, "use quad damage");
     h_frame();
     CHECK(h_stat(p, STAT_TIMER_ICON) == imp_imageindex("p_quad"), "quad takes precedence over armor icon");
-    h_frames_n(start + 3 * h_rate + 1 - h_frames);
+    h_frames_n(pickup_deadline + h_div - h_frames);
     CHECK(h_stat(p, STAT_PICKUP_STRING) == CS_ITEMS + rail_index, "pickup HUD persists through three seconds");
 #ifdef HARNESS_OPENTDM
     int third = h_t23_statusbar(p, mark);
@@ -5058,7 +5614,7 @@ static void sc_t23_item_hud(void)
     h_t23_sample("weapon_pickup", third - second, third >= 0);
 #endif
     h_frame();
-    CHECK(h_stat(p, STAT_PICKUP_STRING) == 0 && h_stat(p, STAT_PICKUP_ICON) == 0, "pickup HUD clears on the next step");
+    CHECK(h_stat(p, STAT_PICKUP_STRING) == 0 && h_stat(p, STAT_PICKUP_ICON) == 0, "pickup HUD clears on the next grid frame");
     h_t23_sample("pickup_hud_clear", h_frames - start - 1, h_stat(p, STAT_PICKUP_ICON));
 #ifdef HARNESS_OPENTDM
     int drop = h_frames;
@@ -5314,10 +5870,11 @@ static void sc_t23_lava_slime(void)
                     h_t23_sample(va("burn_%d_%d", medium, shield), 0, burns);
                 }
                 if (!medium) {
-                    CHECK(h_sounds_log[mark].frame == start, "lava burns audibly on entry");
-                    h_frame();
+                    int first_grid = (h_div - phase) % h_div;
+                    CHECK(h_sounds_log[mark].frame == start + first_grid, "lava burns on the first grid frame");
+                    h_frames_n(first_grid + 1);
                     CHECK(h_count_prefix("player/burn", mark) == 2 &&
-                          h_sounds_log[h_nsounds - 1].frame == start + h_rate,
+                          h_sounds_log[h_nsounds - 1].frame == start + first_grid + h_rate,
                           "next burn sound is allowed after exactly one second");
                     if (!phase) h_t23_sample(va("burn_again_%d", shield), h_frames - start - 1, 2);
                 }
@@ -5345,6 +5902,7 @@ static void sc_t23_drowning(void)
     h_start(h_ents);
     edict_t *p = h_join(0, "p1");
     h_frames_n(h_rate);
+    h_real_phase(0);
     p->health = 100;
     p->waterlevel = 3;
     p->watertype = CONTENTS_WATER;
@@ -5364,21 +5922,24 @@ static void sc_t23_drowning(void)
     CHECK(hits == 3 && h_count_prefix("*gurp", mark) == 3 && h_count_prefix("*pain", mark) == 0,
           "three gulp sounds and no double pain after air expires");
     p->waterlevel = 0;
+    h_real_phase(0);
     h_frame();
     CHECK(h_count_prefix("player/gasp1.wav", mark) == 1, "surfacing after running out of air gasps loudly");
     p->waterlevel = 3;
     h_frames_n(2 * h_rate);
     p->waterlevel = 0;
+    h_real_phase(0);
     h_frame();
     CHECK(h_count_prefix("player/gasp2.wav", mark) == 1, "surfacing before air expires uses normal gasp");
     p->waterlevel = 3;
     start = h_frames;
+    int first_drown = 12 * h_rate + h_div - 1;
     int fresh_health = p->health;
-    for (int i = 0; i < 12 * h_rate; i++) {
+    for (int i = 0; i < first_drown; i++) {
         h_frame();
         if (p->health != fresh_health) break;
     }
-    CHECK(h_frames == start + 12 * h_rate && p->health == fresh_health,
+    CHECK(h_frames == start + first_drown && p->health == fresh_health,
           "surfacing replenishes the full twelve seconds of air");
     h_frame();
     CHECK(fresh_health - p->health == 4, "the renewed air supply ends with a fresh four-point hit");
@@ -5386,9 +5947,6 @@ static void sc_t23_drowning(void)
     mark = h_nsounds;
     int last_drown = h_frames - 1;
     h_frames_n(h_div - 1);
-#ifdef HARNESS_OPENTDM
-    h_real_phase(0);
-#endif
     h_hit(p, 1);
     h_frame();
 #ifndef HARNESS_OPENTDM
@@ -5401,6 +5959,7 @@ static void sc_t23_drowning(void)
     CHECK(h_count_prefix("*pain", mark) == 1, "ordinary pain returns on the first eligible keyframe after drowning");
     h_t23_sample("drown_pain_returns", h_frames - last_drown - 1, h_count_prefix("*pain", mark));
 
+    h_real_phase(0);
     h_t23_use_powerup(p, 3);
     p->waterlevel = 3;
     mark = h_nsounds;
@@ -5419,7 +5978,7 @@ static void sc_t23_drowning(void)
     p->client->breather_framenum = 0;
     start = h_frames;
     int hp = p->health;
-    h_frames_n(10 * h_rate);
+    h_frames_n(10 * h_rate + h_div - 1);
     CHECK(p->health == hp, "last assisted breath provides ten seconds of air");
     h_frame();
     CHECK(p->health < hp, "air runs out ten seconds after rebreather stops");
@@ -5539,6 +6098,7 @@ static void sc_t23_respawn(void)
 #endif
     h_place(b, 800, 0, 24);
     h_tick(b, 0, 1);
+    h_frames_n((h_div - h_frames % h_div) % h_div);
     int start = h_frames;
     h_hit(a, 200);
     h_frames_n(h_rate);
@@ -5546,11 +6106,15 @@ static void sc_t23_respawn(void)
     h_frame();
     CHECK(a->deadflag, "manual respawn waits through the one-second boundary");
     h_think(a, 0, 10);
+    h_frames_n(start + h_rate + h_div - h_frames);
+    CHECK(a->deadflag, "manual respawn waits for the first eligible grid frame");
     h_frame();
-    CHECK(!a->deadflag && a->health > 0, "manual respawn on the first allowed tick");
+    CHECK(!a->deadflag && a->health > 0, "manual respawn on the first eligible grid frame");
     h_t23_sample("manual_spawn", h_frames - start - 1, a->health);
     start = h_frames - kill_wait;
-    h_frames_n(5 * h_rate - 2);
+    int spawn = a->client->respawn_framenum;
+    int kill_at = G_WindowFrame(spawn) + 5 * h_rate;
+    h_frames_n(kill_at - h_div - level.framenum);
     h_client_command(a, "kill");
     CHECK(!a->deadflag, "kill rejected one tick before five seconds from respawn");
     h_frame();
@@ -5558,10 +6122,14 @@ static void sc_t23_respawn(void)
     CHECK(a->deadflag, "kill accepted at five seconds from respawn");
     h_t23_sample("kill_after_spawn", h_frames - start, !!a->deadflag);
     start = h_frames;
-    h_frames_n(3 * h_rate + 1);
+    int death_window = (start + h_div - 1) / h_div * h_div;
+    int force_at = death_window + 3 * h_rate;
+    h_frames_n(force_at + 1 - h_frames);
     CHECK(a->deadflag, "forced respawn waits through its deadline");
+    h_frames_n(force_at + h_div - h_frames);
+    CHECK(a->deadflag, "forced respawn waits for the first eligible grid frame");
     h_frame();
-    CHECK(!a->deadflag && a->health > 0, "forced respawn on first allowed tick");
+    CHECK(!a->deadflag && a->health > 0, "forced respawn on the first eligible grid frame");
     h_t23_sample("forced_spawn", h_frames - start - 1, a->health);
 }
 
@@ -5582,11 +6150,7 @@ static void sc_t23_weapon_pain(void)
     for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
         gitem_t *weapon = (gitem_t *)FindItem((char *)cases[i].name);
         if (!weapon) imp_error("missing weapon %s", cases[i].name);
-#ifdef HARNESS_OPENTDM
-        h_frames_n(p->client->next_weapon_think - level.framenum);
-#else
         h_real_phase(0);
-#endif
         int start = h_frames, sounds = h_nsounds, msgs = h_nmsgs;
 #ifdef HARNESS_OPENTDM
         int ammo = weapon->ammoindex;
@@ -5751,20 +6315,32 @@ static void sc_t23_push_sound(void)
     h_start(h_ents);
     edict_t *p = h_join(0, "p1");
     h_frames_n(h_rate);
-    int start = h_frames, mark = h_nsounds, wind = imp_soundindex("misc/windfly.wav");
-    h_place(p, 512, 0, 24);
-    h_think(p, 0, 10);
-    CHECK(p->velocity[2] == 400 && h_count_sounds(wind, mark) == 1, "jump pad launches with windfly on the contacting usercmd");
-    h_think(p, 0, 10);
-    h_frames_n(15 * h_rate / 10);
-    h_place(p, 512, 0, 24);
-    h_think(p, 0, 10);
-    CHECK(h_count_sounds(wind, mark) == 1, "same-frame and deadline contacts are silent");
-    h_frame();
-    h_place(p, 512, 0, 24);
-    h_think(p, 0, 10);
-    CHECK(h_count_sounds(wind, mark) == 2, "windfly plays on the first step after 1.5 s");
-    h_t23_sample("windfly", h_frames - start, h_count_sounds(wind, mark));
+    int wind = imp_soundindex("misc/windfly.wav");
+    for (int phase = 0; phase < h_div; phase++) {
+        h_frames_n(2 * h_rate);
+        h_real_phase(phase);
+        int start = h_frames, mark = h_nsounds;
+        int cutoff = start + h_to_grid() + 15 * h_div;
+        h_place(p, 512, 0, 24);
+        h_think(p, 0, 10);
+        CHECK(p->velocity[2] == 400 && h_count_sounds(wind, mark) == 1,
+              "jump pad launches with windfly on the contacting usercmd");
+        h_think(p, 0, 10);
+        h_frames_n(cutoff - h_div - h_frames);
+        h_place(p, 512, 0, 24);
+        h_think(p, 0, 10);
+        CHECK(h_count_sounds(wind, mark) == 1, "jump pad is silent in window 14");
+        h_frames_n(h_div);
+        h_place(p, 512, 0, 24);
+        h_think(p, 0, 10);
+        CHECK(h_count_sounds(wind, mark) == 1, "jump pad is silent in window 15");
+        h_frame();
+        h_place(p, 512, 0, 24);
+        h_think(p, 0, 10);
+        CHECK(h_count_sounds(wind, mark) == 2, "jump pad plays again on the first contact in window 16");
+        if (!phase)
+            h_t23_sample("windfly", h_frames - start, h_count_sounds(wind, mark));
+    }
 }
 
 static void sc_t23_edict_reuse(void)
@@ -5811,28 +6387,31 @@ static void sc_t23_projectile_lifetime(void)
     fire_rocket(a, start, aim, 20, 2000, 20, 30);
     edict_t *rocket = h_by_class("rocket", 0);
     if (!bolt || !map_bolt || !rocket) imp_error("projectile did not spawn");
-    int spawned = h_frames;
+    int window = h_frames + h_grid_wait();
     int frozen = 0;
 #ifdef HARNESS_OPENTDM
     h_frames_n(h_rate);
+    int paused = h_frames + (h_div - level.realframenum % h_div) % h_div;
     h_client_command(a, "time");
-    int paused = h_frames;
     h_frames_n(5 * h_rate);
     CHECK(tdm_match_status == MM_TIMEOUT && bolt->inuse && map_bolt->inuse && rocket->inuse, "all lifetimes freeze in pause");
     h_client_command(a, "time");
     h_t23_wait_resume();
     frozen = h_frames - paused - 1;
 #endif
-    h_frames_n(spawned + frozen + 2 * h_rate - h_frames);
+    h_frames_n(window + frozen + 2 * h_rate - h_frames);
+    /* The match clock stops during OpenTDM timeouts; the world grid keeps running. */
+    window += h_grid_wait();
+    h_frames_n(h_grid_wait());
     CHECK(bolt->inuse && map_bolt->inuse, "both bolts exist one step before two seconds");
     h_frame();
     CHECK(!bolt->inuse && !map_bolt->inuse && rocket->inuse, "two bolts expire after two match seconds");
-    h_t23_sample("bolts", h_frames - spawned - frozen - 1, !bolt->inuse + !map_bolt->inuse);
+    h_t23_sample("bolts", h_frames - window - frozen - 1, !bolt->inuse + !map_bolt->inuse);
     h_frames_n(2 * h_rate - 1);
     CHECK(rocket->inuse, "rocket exists one step before four seconds");
     h_frame();
     CHECK(!rocket->inuse, "rocket expires after 8000 units/speed in match time");
-    h_t23_sample("rocket", h_frames - spawned - frozen - 1, !rocket->inuse);
+    h_t23_sample("rocket", h_frames - window - frozen - 1, !rocket->inuse);
 }
 
 static void sc_t23_bfg_effects(void)
@@ -5906,6 +6485,7 @@ static void h_t23_map_timing_targets(edict_t *p)
     edict_t *timer = h_by_class("func_timer", 0), *jitter = h_by_class("func_timer", 1);
     edict_t *multiple = h_by_class("trigger_multiple", 0), *explosion = h_by_class("target_explosion", 0);
     if (!clock || !timer || !jitter || !multiple || !explosion) imp_error("map timing fixture did not spawn");
+    h_real_phase(0);
     int start = h_frames;
     timer->use(timer, p, p);
     clock->use(clock, p, p);
@@ -5935,7 +6515,7 @@ static void h_t23_map_timing_targets(edict_t *p)
     clock->use(clock, p, p);
     h_t23_target_event(2, 3, "clock_restart", start, 0, 2);
 
-    CHECK(fabsf(jitter->random - (0.2f - 1.0f / h_rate)) < H_EPS, "random equal to wait is clamped one tick below wait");
+    CHECK(fabsf(jitter->random - (0.2f - 0.1f)) < H_EPS, "random equal to wait is clamped one tick below wait");
     h_t23_seed(0);
     jitter->use(jitter, p, p);
     int n = h_t23_events[5].count;
@@ -6238,6 +6818,15 @@ static void sc_t23_movers_wait(void)
     h_t23_mover_wait("secret_close_wait", arrived, depart, h_rate);
 }
 
+#include "grid_clocks.h"
+#include "timeout_movers.h"
+#include "match_grid_rules.h"
+#include "match_grid_timeout.h"
+#include "match_timeout_toss.h"
+#include "timeout_grenade.h"
+#include "item_grid_edges.h"
+
+#ifdef HARNESS_ENGINE
 static void sc_unlag_default(void)
 {
     h_scene_base();
@@ -6245,8 +6834,50 @@ static void sc_unlag_default(void)
     cvar_t *mode = h_cvar_find("g_unlag");
     CHECK(mode && mode->value == 0, "g_unlag is registered and off by default");
 }
+#endif
 
 static const struct { const char *name; void (*run)(void); } h_scenarios[] = {
+    { "item_grid_dropped_quad_expiry", sc_item_grid_dropped_quad_expiry },
+    { "item_grid_short_timer", sc_item_grid_short_timer },
+#ifndef HARNESS_OPENTDM
+    { "item_grid_spawn_protection", sc_item_grid_spawn_protection },
+#endif
+    { "match_kill_grid", sc_match_kill_grid },
+    { "match_respawn_deadline", sc_match_respawn_deadline },
+    { "match_vote_end_grid", sc_match_vote_end_grid },
+    { "grid_durations", sc_grid_durations },
+#ifdef HARNESS_OPENTDM
+    { "match_overtime_vote_grid", sc_match_overtime_vote_grid },
+    { "match_countdown_grid", sc_match_countdown_grid },
+    { "match_timeout_grid", sc_match_timeout_grid },
+    { "match_timeout_think_grid", sc_match_timeout_think_grid },
+    { "match_timeout_reentry", sc_match_timeout_reentry },
+    { "match_timeout_win_grid", sc_match_timeout_win_grid },
+    { "match_timeout_restart_grid", sc_match_timeout_restart_grid },
+    { "match_timeout_break_grid", sc_match_timeout_break_grid },
+    { "match_timeout_toss", sc_match_timeout_toss },
+    { "match_timeout_body_slot", sc_match_timeout_body_slot },
+    { "timeout_grenade_fuse", sc_timeout_grenade_fuse },
+    { "timeout_door_linear", sc_timeout_door_linear },
+    { "timeout_door_accel", sc_timeout_door_accel },
+    { "timeout_plat_linear", sc_timeout_plat_linear },
+    { "timeout_plat_accel", sc_timeout_plat_accel },
+    { "timeout_door_rotating", sc_timeout_door_rotating },
+    { "timeout_train", sc_timeout_train },
+    { "timeout_button_linear", sc_timeout_button_linear },
+    { "timeout_button_accel", sc_timeout_button_accel },
+    { "grid_exit_missing", sc_grid_exit_missing },
+    { "grid_exit_same", sc_grid_exit_same },
+#else
+    { "grid_reset_command", sc_grid_reset_command },
+    { "grid_reset_countdown", sc_grid_reset_countdown },
+    { "grid_reset_missing", sc_grid_reset_missing },
+    { "grid_reset_same", sc_grid_reset_same },
+    { "grid_reset_phase_reader", sc_grid_reset_phase_reader },
+    { "grid_reset_slow", sc_grid_reset_slow },
+    { "grid_reset_map", sc_grid_reset_map },
+    { "grid_reset_thresholds", sc_grid_reset_thresholds },
+#endif
     { "smoke", sc_smoke },
     { "t01_rate_refuse", sc_t01_rate_refuse },
     { "t01_rate_zero", sc_t01_rate_zero },
@@ -6255,6 +6886,13 @@ static const struct { const char *name; void (*run)(void); } h_scenarios[] = {
     { "t09_hyperblaster_held", sc_t09_hyperblaster_held },
     { "t09_rocket_held", sc_t09_rocket_held },
     { "t09_rocket_tap", sc_t09_rocket_tap },
+    { "w_timing_window", sc_w_timing_window },
+    { "w_special_windowclock", sc_w_special_windowclock },
+    { "w_second_short_tap", sc_w_second_short_tap },
+#ifndef HARNESS_OPENTDM
+    { "w_second_tap_while_firing", sc_w_second_tap_while_firing },
+    { "w_respawn_latch", sc_w_respawn_latch },
+#endif
     { "t09_rocket_tick_tap", sc_t09_rocket_tick_tap },
     { "t09_machinegun_tick_tap", sc_t09_machinegun_tick_tap },
     { "t09_hyperblaster_tick_tap", sc_t09_hyperblaster_tick_tap },
@@ -6267,6 +6905,7 @@ static const struct { const char *name; void (*run)(void); } h_scenarios[] = {
     { "t09_hyperblaster_batch_taps", sc_t09_hyperblaster_batch_taps },
     { "t09_rocket_tap_spam", sc_t09_rocket_tap_spam },
     { "t09_machinegun_tap_spam", sc_t09_machinegun_tap_spam },
+    { "t09_machinegun_tap_observed", sc_t09_machinegun_tap_observed },
     { "t09_rocket_noammo", sc_t09_rocket_noammo },
     { "t09_lifecycle_none", sc_t09_lifecycle_none },
     { "t09_lifecycle_death", sc_t09_lifecycle_death },
@@ -6288,6 +6927,7 @@ static const struct { const char *name; void (*run)(void); } h_scenarios[] = {
     { "t10_grenade_switch", sc_t10_grenade_switch },
     { "t11_hurt_normal", sc_t11_hurt_normal },
     { "t11_hurt_slow", sc_t11_hurt_slow },
+    { "t11_hurt_sound_grid", sc_t11_hurt_sound_grid },
     { "t11_hurt_toggle", sc_t11_hurt_toggle },
     { "t11_hurt_silent", sc_t11_hurt_silent },
     { "t11_hurt_god_plain", sc_t11_hurt_no_protection },
@@ -6330,6 +6970,9 @@ static const struct { const char *name; void (*run)(void); } h_scenarios[] = {
     { "t15_match_hud", sc_t15_match_hud },
     { "t15_timeout_hud", sc_t15_timeout_hud },
     { "t15_players_time", sc_t15_players_time },
+    { "t09_timeout_release_mg", sc_t09_timeout_release_mg },
+    { "t10_timeout_release_grenade", sc_t10_timeout_release_grenade },
+    { "t10_timeout_hold_grenade", sc_t10_timeout_hold_grenade },
     { "t01_fixed_engine", sc_t01_fixed_engine },
     { "t18_environment_resume", sc_t18_environment_resume },
     { "t17_ghost_ratelimit", sc_t17_ghost_ratelimit },
@@ -6343,36 +6986,7 @@ static const struct { const char *name; void (*run)(void); } h_scenarios[] = {
     { "t18_drown_pain", sc_t18_drown_pain },
     { "t18_powerup_warn_timeout", sc_t18_powerup_warn_timeout },
     { "t18_kick_timeout", sc_t18_kick_timeout },
-    { "t09_timeout_release_mg", sc_t09_timeout_release_mg },
-    { "t10_timeout_release_grenade", sc_t10_timeout_release_grenade },
-    { "t10_timeout_hold_grenade", sc_t10_timeout_hold_grenade },
-#endif
-    { "t24_plat_object", sc_t24_plat_object },
-    { "t24_crush_overflow_count", sc_t24_crush_overflow_count },
-#ifdef HARNESS_OPENTDM
-    { "t24_view_timeout_fall", sc_t24_view_timeout_fall },
-    { "t24_view_timeout_damage", sc_t24_view_timeout_damage },
-    { "t24_view_no_timeout", sc_t24_view_no_timeout },
-    { "t24_view_frozen", sc_t24_view_frozen },
-#endif
-    { "t24_toss_free", sc_t24_toss_free },
-    { "t24_toss_bounce", sc_t24_toss_bounce },
-    { "t24_toss_wall_toggle", sc_t24_toss_wall_toggle },
-#ifdef HARNESS_ENGINE
-    { "t24_toss_edge", sc_t24_toss_edge },
-    { "t24_toss_outer_corner", sc_t24_toss_outer_corner },
-    { "t24_toss_drop", sc_t24_toss_drop },
-#else
-    { "t24_toss_head", sc_t24_toss_head },
-    { "t24_toss_hold", sc_t24_toss_hold },
-    { "t24_toss_land", sc_t24_toss_land },
-    { "t24_toss_pad", sc_t24_toss_pad },
-    { "t24_toss_projectile", sc_t24_toss_projectile },
-#ifdef HARNESS_OPENTDM
-    { "t24_toss_timeout", sc_t24_toss_timeout },
-#endif
-#endif
-#ifdef HARNESS_OPENTDM
+    /* OpenTDM only: ready, countdown, overtime and match settlement. */
     { "t23_match_phases", sc_t23_match_phases },
     { "t23_timeout_clocks", sc_t23_timeout_clocks }, /* Match clocks and duel reconnect during timeout. */
     { "t23_scoreboard_handicap", sc_t23_scoreboard_handicap }, /* Match scoreboard and ping handicap. */
@@ -6405,7 +7019,41 @@ static const struct { const char *name; void (*run)(void); } h_scenarios[] = {
     { "t23_map_timers", sc_t23_map_timers }, /* Box: Map timer and hazard timing. */
     { "t23_viper_pitch", sc_t23_viper_pitch }, /* Engine: Viper bomb pitch over time. */
     { "t23_movers_wait", sc_t23_movers_wait }, /* Engine: Mover waits and endpoints. */
+    { "t24_plat_object", sc_t24_plat_object },
+    { "t24_plat_object_linear", sc_t24_plat_object_linear },
 #ifdef HARNESS_ENGINE
+    { "t24_plat_real_debris", sc_t24_plat_real_debris },
+#endif
+    { "t24_plat_late_support", sc_t24_plat_late_support },
+    { "t24_plat_fuse", sc_t24_plat_fuse },
+    { "t24_crush_overflow_count", sc_t24_crush_overflow_count },
+#ifdef HARNESS_OPENTDM
+    { "t24_view_timeout_fall", sc_t24_view_timeout_fall },
+    { "t24_view_timeout_damage", sc_t24_view_timeout_damage },
+    { "t24_view_no_timeout", sc_t24_view_no_timeout },
+    { "t24_view_frozen", sc_t24_view_frozen },
+#endif
+    { "t24_toss_free", sc_t24_toss_free },
+    { "t24_toss_bounce", sc_t24_toss_bounce },
+    { "t24_toss_wall_toggle", sc_t24_toss_wall_toggle },
+#ifdef HARNESS_ENGINE
+    { "t24_toss_edge", sc_t24_toss_edge },
+    { "t24_toss_outer_corner", sc_t24_toss_outer_corner },
+    { "t24_toss_drop", sc_t24_toss_drop },
+    { "t24_grid_solid", sc_t24_grid_solid },
+#else
+    { "t24_toss_head", sc_t24_toss_head },
+    { "t24_toss_hold", sc_t24_toss_hold },
+    { "t24_toss_land", sc_t24_toss_land },
+    { "t24_toss_pad", sc_t24_toss_pad },
+    { "t24_toss_projectile", sc_t24_toss_projectile },
+    { "t24_grid_mapblaster", sc_t24_grid_mapblaster },
+#ifdef HARNESS_OPENTDM
+    { "t24_toss_timeout", sc_t24_toss_timeout },
+#endif
+#endif
+#ifdef HARNESS_ENGINE
+    { "unlag_default", sc_unlag_default },
     { "unlag_fixture", sc_unlag_fixture },
     { "unlag_rail", sc_unlag_rail },
     { "unlag_no_extension", sc_unlag_no_extension },
@@ -6433,6 +7081,5 @@ static const struct { const char *name; void (*run)(void); } h_scenarios[] = {
     { "unlag_match_stats", sc_unlag_match_stats },
 #endif
 #endif
-    { "unlag_default", sc_unlag_default },
     { NULL, NULL }
 };

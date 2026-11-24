@@ -371,10 +371,35 @@ remote_lerp() {
         "$Q2PRO/src/client/remote_lerp.c" -lm -o "$OUT/remote_lerp_test" && "$OUT/remote_lerp_test"
 }
 
+grid_client() {
+    local dir=$1 game=$2 rate=$3 mod=$4 scenario rc=0 fixture=()
+    shift 4
+    [[ -n $mod ]] && fixture+=(CL_GRID_DISPLAY=1)
+    [[ $mod == opentdm ]] && fixture+=(CL_DISPLAY_OPENTDM=1)
+    for scenario; do
+        env "${fixture[@]}" CL_BASE="$dir/base" CL_GAME="$game" CL_RATE="$rate" \
+            timeout -k 5 120 "$dir/driver" "$scenario" || rc=1
+    done
+    return "$rc"
+}
+
+build_grid_client() {
+    need Q2PRO Q2_DATA || return
+    engine_harness client "$1" "$2" --grid
+}
+
+build_grid_module() {
+    local mod=$1 dir=$2 src=$3
+    shift 3
+    need "${mod^^}" || return
+    python3 "$HERE/mods/api3/build.py" --engine-build "$OUT/bded-fps" --out "$dir" \
+        --mod "$mod" --mod-src "$src" --display "$@"
+}
+
 # control NAME FILE HARNESS RATE SCENARIOS SED...: see controls.txt. PASS
 # when a scenario fails an assertion (a crash or a timeout is not a catch)
 control() {
-    local name=$1 file=$2 how=$3 rate=$4 list=$5 rc var dir=$OUT/neg/$1 rel copy s out bin e=() run=() args=()
+    local name=$1 file=$2 how=$3 rate=$4 list=$5 rc var dir=$OUT/neg/$1 rel copy s out bin assertion= failures e=() run=() args=()
     shift 5
     var=${file%%/*} rel=${file#*/}
     var=${var^^}
@@ -385,7 +410,13 @@ control() {
         [[ -f $OUT/upstream/$var/$rel ]] || { echo "missing input: upstream of $var (see stage upstream-${var,,})"; return 77; }
         cp "$OUT/upstream/$var/$rel" "$copy"
     else
-        for s; do e+=(-e "$s"); done
+        for s; do
+            if [[ $s == assertion:* ]]; then
+                assertion=${s#assertion:}
+            else
+                e+=(-e "$s")
+            fi
+        done
         sed "${e[@]}" "${!var}/$rel" >"$copy" || return 1
     fi
     cmp -s "${!var}/$rel" "$copy" && { echo "FAIL mutation did not apply"; return 1; }
@@ -405,6 +436,17 @@ control() {
                 { echo "FAIL mutated build"; return 1; }
             bin=$dir/build/driver run=(CL_GAME="$dir/build/testgame.so" CL_BASE="$dir/build/base" CL_RATE="$rate"
                 CL_KIND="$kind" CL_UPDATERATE="${update:-0}") ;;
+        grid-client)
+            engine_harness client "$OUT/bcl-fps" "$dir/build" --grid --replace "$rel=$copy" ||
+                { echo "FAIL mutated build"; return 1; }
+            bin=$dir/build/driver run=(CL_GAME="$dir/build/testgame.so" CL_BASE="$dir/build/base" CL_RATE="$rate") ;;
+        grid-display)
+            build_grid_client "$OUT/bcl-fps" "$dir/client" &&
+                build_grid_module "${var,,}" "$dir/build" "${!var}" --replace "$rel=$copy" ||
+                { echo "FAIL mutated build"; return 1; }
+            bin=$dir/client/driver
+            run=(CL_GRID_DISPLAY=1 CL_GAME="$dir/build/display.so" CL_BASE="$dir/client/base" CL_RATE="$rate")
+            [[ $var == OPENTDM ]] && run+=(CL_DISPLAY_OPENTDM=1) ;;
         remote)
             cc -std=c99 -Wall -Wextra -Werror -O2 -I"$Q2PRO/src/client" "$HERE/engine/client/remote_lerp_test.c" \
                 "$copy" -lm -o "$dir/remote_lerp_test" || { echo "FAIL mutated build"; return 1; }
@@ -420,12 +462,18 @@ control() {
     for s in $list; do
         out=$(env "${run[@]}" timeout -k 5 120 "$bin" "$s" 2>&1) && continue
         rc=$?
-        if ((rc != 1)) || command grep -q '^  FAIL game error:' <<<"$out" ||
-            ! command grep -E '^  FAIL .+\.[ch]:[0-9]+: ' <<<"$out"; then
+        failures=$(command grep -E '^  FAIL .+\.[ch]:[0-9]+: ' <<<"$out")
+        if ((rc != 1)) || command grep -q '^  FAIL game error:' <<<"$out" || [[ -z $failures ]]; then
             echo "$out"
             echo "FAIL negative control $name: $s returned $rc without a valid assertion failure"
             return 1
         fi
+        if [[ -n $assertion ]] && ! command grep -Fq -- "$assertion" <<<"$failures"; then
+            echo "$failures"
+            echo "FAIL negative control $name: missing assertion '$assertion'"
+            return 1
+        fi
+        echo "$failures"
         echo "negative control $name: caught by $s at $rate Hz"
         return 0
     done
@@ -474,6 +522,32 @@ else
 stage capability capability
 stage remote-lerp remote_lerp
 stage unlag-sources unlag_sources
+stage build-grid-client build_grid_client "$OUT/bcl-fps" "$OUT/grid-client"
+stage build-grid-client-fixed build_grid_client "$OUT/bcl" "$OUT/grid-client-fixed"
+stage grid-framediv-fixed@10 grid_client "$OUT/grid-client-fixed" "$OUT/grid-client-fixed/testgame.so" 10 '' framediv_divisor
+for mod in openffa opentdm; do
+    source_var=${mod^^}
+    stage build-grid-$mod build_grid_module "$mod" "$OUT/grid-$mod" "${!source_var}"
+done
+for r in $RATES; do
+    frame_tests=(framediv_divisor)
+    ((r == 60)) && frame_tests+=(framediv_receiver framediv_snapshot framediv_legacy framediv_reload framediv_mvd)
+    stage grid-framediv@$r grid_client "$OUT/grid-client" "$OUT/grid-client/testgame.so" "$r" '' "${frame_tests[@]}"
+    for mod in openffa opentdm; do
+        display_tests=(grid_display grid_display_roles grid_display_partial)
+        if ((r > 10)); then
+            display_tests+=(grid_display_angles grid_display_push grid_display_rotate grid_display_undo)
+            [[ $mod == opentdm ]] && display_tests+=(grid_display_timeout)
+        fi
+        if ((r == 60)); then
+            display_tests+=(grid_display_mvd grid_load_reload grid_load_short grid_load_version
+                grid_load_no_get grid_load_no_reply grid_load_no_div grid_load_unlag_only
+                grid_load_framediv_only grid_load_api3 grid_load_production)
+        fi
+        stage grid-display-$mod@$r grid_client "$OUT/grid-client" "$OUT/grid-$mod/display.so" \
+            "$r" "$mod" "${display_tests[@]}"
+    done
+done
 # the fixed (10 Hz only) engine
 stage scheduler-fixed@10 scheduler "$OUT/bded" "$OUT/sched" 10
 stage client-fixed@10 client "$OUT/bcl" "$OUT/cl" 10 new 0

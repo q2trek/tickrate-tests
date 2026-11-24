@@ -65,7 +65,10 @@ def main():
     ap.add_argument('--out', required=True)
     ap.add_argument('--data', help='Quake 2 directory with baseq2/pak*.pak')
     ap.add_argument('--replace', action='append', default=[])
+    ap.add_argument('--grid', action='store_true', help='include client projectile snapshot scenarios')
     a = ap.parse_args()
+    if a.grid and a.harness != 'client':
+        ap.error('--grid requires client')
     target, main_src, wraps = TARGETS[a.harness]
     src_dir = HERE / a.harness
     build = Path(a.engine_build).resolve()
@@ -105,6 +108,9 @@ def main():
              if x not in ('-fvisibility=hidden', '-Wmissing-prototypes')]
     # __FILE__ in assertion lines relative to the repository
     flags += [f'-ffile-prefix-map={HERE.parent}/=']
+    if a.grid:
+        flags += ['-DH_GRID_TESTS']
+        wraps = wraps + ['Sys_GetProcAddress']
     run(flags + ['-fdiagnostics-color=never', '-c', str(src_dir / 'driver.c'), '-o', str(out / 'driver.o')],
         cwd=main_entry['directory'])
     run([link[0], '-o', str(out / 'driver'), str(out / 'driver.o')] + objects + ['-rdynamic'] +

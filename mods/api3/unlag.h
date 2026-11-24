@@ -127,13 +127,13 @@ static void hu_arm(edict_t *ent, const char *name)
     client->weapon = FindItem((char *)name);
 #ifdef HARNESS_OPENTDM
     client->ammo_index = client->weapon->ammoindex;
-    client->next_weapon_think = 0;
 #else
     client->ammo_index = ITEM_INDEX(FindItem(client->weapon->ammo));
+    client->attack_pending = false;
 #endif
     client->inventory[client->ammo_index] = 100;
     client->weaponstate = WEAPON_READY;
-    client->weapon_thunk = client->attack_pending = false;
+    client->weapon_thunk = false;
     client->buttons = client->latched_buttons = 0;
     client->pers.hand = CENTER_HANDED;
 }
@@ -293,7 +293,7 @@ static void hu_delayed(edict_t *shooter, edict_t *target, int phase, bool old_ra
     hu_position(target, 512, -30, 24);
     target->health = 1000;
     h_frames_n(2 * h_div);
-    while (level.framenum % h_div != phase)
+    while (h_frames % h_div != phase)
         h_frame();
     hu_arm(shooter, "Railgun");
     shooter->client->weapon_thunk = true;
@@ -301,17 +301,27 @@ static void hu_delayed(edict_t *shooter, edict_t *target, int phase, bool old_ra
     int age = 2 * h_div;
     int due = press + (phase ? 2 * h_div - phase : h_div);
 #ifdef HARNESS_OPENTDM
-    shooter->client->next_weapon_think = level.framenum + due - press;
+    shooter->client->buttons = BUTTON_ATTACK;   /* already held at the previous weapon step */
 #endif
     int latest = due - h_div;
     int before = h_unlag_lines;
     hu_command(shooter, BUTTON_ATTACK, UNLAG_ESTIMATE, press - age, -30);
+#ifdef HARNESS_OPENTDM
+    CHECK(!(shooter->client->latched_buttons & BUTTON_ATTACK) && h_unlag_lines == before,
+          "phase %d held attack waits for the grid step without a new press", phase);
+#else
     CHECK(shooter->client->attack_pending && h_unlag_lines == before, "phase %d press waits for the weapon step", phase);
+#endif
     for (; h_frames <= due; h_frame()) {
         int y = h_frames < latest ? -30 : (h_frames - latest) * (30 / h_div);
         hu_position(target, 512, y, 24);
-        if (h_frames == due)
+        if (h_frames == due) {
+#ifdef HARNESS_OPENTDM
+            hu_command(shooter, BUTTON_ATTACK, UNLAG_ESTIMATE, latest, old_ray ? -30 : 0);
+#else
             hu_command(shooter, 0, UNLAG_ESTIMATE, latest, old_ray ? -30 : 0);
+#endif
+        }
     }
     CHECK(h_unlag_lines == before + 1, "phase %d fired once in RunFrame after %d ticks", phase, due - press);
     CHECK(target->health == (old_ray ? 1000 : 900), "phase %d delayed rail %s (health %d)",
@@ -384,9 +394,12 @@ static void hu_rail_overlap(bool both_historical)
     TDM_LeftTeam(b, false);
     b->client->pers.team = TEAM_B;
     JoinedTeam(b, false, false);
-    level.match_start_framenum = level.framenum;
 #endif
     edict_t *rear = hu_join(3, "rear");
+#ifdef HARNESS_OPENTDM
+    /* Start once, with all targets joined and telefrag-avoiding spawns active. */
+    level.match_start_framenum = level.framenum;
+#endif
     hu_begin_match();
     hu_position(shooter, 0, 0, 24);
     hu_position(a, 128, -8, 24);
@@ -703,11 +716,7 @@ static void sc_unlag_history(void)
     target = hu_join(1, "reinit");
     hu_command(target, 0, UNLAG_ESTIMATE, h_frames - 2, 0);
     CHECK(G_UnlagBeginShot(target).estimated, "module holds a command estimate before reinit");
-    ge->Shutdown();
-#ifdef HARNESS_OPENTDM
-    /* The linked fixture retains the old entity string across Shutdown. */
-    level.entity_string = NULL;
-#endif
+    h_shutdown();
     h_unlag_initialized = false;
     h_frames = 0;
     h_start(h_ents);
@@ -845,7 +854,11 @@ static void sc_unlag_lifetimes(void)
     hu_log(0, -1, 0, 0, 0);
 
     hu_arm(shooter, "Railgun");
+#ifdef HARNESS_OPENTDM
+    shooter->client->buttons = BUTTON_ATTACK;
+#else
     shooter->client->attack_pending = true;
+#endif
     int before = h_unlag_lines;
     for (int i = 0; i < 2 * h_div && h_unlag_lines == before; i++)
         h_frame();
@@ -1058,7 +1071,8 @@ static void sc_unlag_blockers(void)
         CHECK(bfg, "BFG projectile spawned in mode %d", mode);
         if (!bfg)
             return;
-        for (int i = 0; i <= h_div && target->health == 1000; i++)
+        // Allow a first flight step and the following grid step for the first laser.
+        for (int i = 0; i < 2 * h_div && target->health == 1000; i++)
             h_frame();
         laser_damage[mode] = 1000 - target->health;
         CHECK(laser_damage[mode] == 5 && meansOfDeath == MOD_BFG_LASER,
@@ -1214,18 +1228,21 @@ static void sc_unlag_timeout(void)
     CHECK(tdm_match_status == MM_TIMEOUT, "match entered timeout through the player command");
     if (tdm_match_status != MM_TIMEOUT)
         return;
-    int match_frame = level.framenum;
     h_client_command(shooter, "time");
+    h_frames_n((h_div - level.realframenum % h_div) % h_div + 1);
+    int match_frame = level.framenum;
+    vec3_t frozen;
+    VectorCopy(target->s.origin, frozen);
     int to_fight = level.match_resume_framenum - level.realframenum;
     CHECK(to_fight > 0, "the timeout caller starts the resume countdown");
     if (to_fight <= 0)
         return;
     h_frames_n(to_fight);
-    CHECK(tdm_match_status == MM_TIMEOUT && level.framenum == match_frame && target->s.origin[1] == 0,
+    CHECK(tdm_match_status == MM_TIMEOUT && level.framenum == match_frame && VectorCompare(target->s.origin, frozen),
           "timeout keeps the match clock and pose fixed while world frames advance");
     int paused = h_frames - (h_div + 1) / 2;
     const unlag_pose_t *pose = G_UnlagHistory(target, paused);
-    CHECK(pose && pose->origin[1] == 0, "timeout world frame records the frozen target pose");
+    CHECK(pose && VectorCompare(pose->origin, frozen), "timeout world frame records the frozen target pose");
     hu_command(shooter, 0, UNLAG_ESTIMATE, paused, 0);
     int prints = h_nbprints;
     h_frame();

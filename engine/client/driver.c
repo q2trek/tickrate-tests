@@ -39,6 +39,9 @@
  *                                  CL_PEER_LEAVE)
  */
 #include <unistd.h>
+#ifdef H_GRID_TESTS
+#include <sys/wait.h>
+#endif
 #include "src/client/client.h"
 #include "src/server/server.h"
 
@@ -518,6 +521,11 @@ static void h_ack_f(void) { h_pending = 0; }
 
 static int h_ent_x_base, h_teleport;
 static int h_game_frames;
+#ifdef H_GRID_TESTS
+static bool h_skipped;
+static void h_framediv_game_frame(game_import_t *gi, edict_t *edicts);
+#endif
+
 
 void h_game_runframe(game_import_t *gi, edict_t *edicts, int frame)
 {
@@ -537,6 +545,9 @@ void h_game_runframe(game_import_t *gi, edict_t *edicts, int frame)
     gclient_new_t *c = (gclient_new_t *)edicts[1].client;
     if (c && !h_pacing_manual && !h_pacing_pin_origin)
         c->ps.pmove.origin[0] = (frame % 400) * 8;
+#ifdef H_GRID_TESTS
+    h_framediv_game_frame(gi, edicts);
+#endif
 }
 
 /* -------------------------------------------------------------- engine */
@@ -691,6 +702,10 @@ static void h_init(void)
         // players are PM_FREEZE (not captured): keep MVD streams unsuspended
         "+set", "sv_mvd_suspend_time", "0", "+set", "cl_updaterate", update,
         "+set", "name", getenv("CL_NAME") ? getenv("CL_NAME") : "h_client");
+#ifdef H_GRID_TESTS
+    if (getenv("CL_HOME")) ARG("+set", "homedir", getenv("CL_HOME"));
+    if (getenv("CL_GRID_DISPLAY")) ARG("+set", "deathmatch", "1");
+#endif
     if (h_pacing_protocol34) ARG("+set", "cl_protocol", "34");
     if (connect) {
         /* the paks are local; qport from the fleet (the default is the start
@@ -1833,7 +1848,99 @@ typedef struct { const char *name; void (*run)(void); int rated_only, kinds; } s
 #include "pacing.h"
 #include "shot-time.h"
 
+
+#ifdef H_GRID_TESTS
+#define H_SHA "grid-flight"
+static char h_home[256];
+
+static void h_make_home(void)
+{
+    snprintf(h_home, sizeof(h_home), "%s/replay-XXXXXX", getenv("TMPDIR") ? getenv("TMPDIR") : "/tmp");
+    if (!mkdtemp(h_home)) { perror("mkdtemp"); exit(2); }
+    setenv("CL_HOME", h_home, 1);
+}
+
+static int h_child(const char *scenario)
+{
+    fflush(stdout);
+    pid_t pid = fork();
+    if (pid < 0) { perror("fork"); return 2; }
+    if (!pid) { execl("/proc/self/exe", "driver", scenario, (char *)NULL); _exit(127); }
+    int status;
+    while (waitpid(pid, &status, 0) < 0) {
+        if (errno != EINTR) { perror("waitpid"); return 2; }
+    }
+    return WIFEXITED(status) ? WEXITSTATUS(status) : 128;
+}
+
+static void h_init_replay(const char *var, const char *drop)
+{
+    (void)drop;
+    const char *args = getenv(var);
+    char tail[256];
+    Q_assert(args && strlen(args) < sizeof(tail));
+    strcpy(tail, args);
+    char *argv[32] = { "q2pro", "+set", "basedir", getenv("CL_BASE"),
+                       "+set", "homedir", h_home, "+set", "sys_console", getenv("CL_CONSOLE") ? "1" : "0",
+                       "+set", "logfile", "0" };
+    int argc = 10;
+    for (char *token = strtok(tail, "\n"); token; token = strtok(NULL, "\n")) {
+        Q_assert(argc < q_countof(argv) - 1);
+        argv[argc++] = token;
+    }
+    Qcommon_Init(argc, argv);
+    cls.active = ACT_ACTIVATED;
+    CL_UpdateFrameTimes();
+}
+
+static bool h_replay_active(int max_ms)
+{
+    for (int i = 0; i < max_ms; i++) {
+        if (cls.state == ca_active && cl.frame.valid)
+            return true;
+        h_tick(1);
+    }
+    return false;
+}
+
+#include "framediv.h"
+#include "grid-display.h"
+#include "grid-load.h"
+#endif
+
 static const scenario_t h_scenarios[] = {
+#ifdef H_GRID_TESTS
+    { "framediv_divisor", framediv_divisor, 0, 0 },
+    { "framediv_receiver", framediv_receiver, 0, 0 },
+    { "framediv_snapshot", framediv_snapshot, 0, 0 },
+    { "framediv_legacy", framediv_legacy, 0, 0 },
+    { "framediv_reload", framediv_reload, 0, 0 },
+    { "framediv_mvd", framediv_mvd, 0, 0 },
+    { "framediv_record", framediv_record, 0, 0 },
+    { "framediv_play_dm2", framediv_play_dm2, 0, 0 },
+    { "grid_display", grid_display, 0, 0 },
+    { "grid_display_roles", grid_display_roles, 0, 0 },
+    { "grid_display_angles", grid_display_angles, 0, 0 },
+    { "grid_display_push", grid_display_push, 0, 0 },
+    { "grid_display_rotate", grid_display_rotate, 0, 0 },
+    { "grid_display_undo", grid_display_undo, 0, 0 },
+    { "grid_display_partial", grid_display_partial, 0, 0 },
+    { "grid_display_timeout", grid_display_timeout, 0, 0 },
+    { "grid_display_mvd", grid_display_mvd, 0, 0 },
+    { "grid_display_record", grid_display_record, 0, 0 },
+    { "grid_display_dm2", grid_display_dm2, 0, 0 },
+    { "grid_load_reload", grid_load_reload, 0, 0 },
+    { "grid_load_short", grid_load_short, 0, 0 },
+    { "grid_load_version", grid_load_version, 0, 0 },
+    { "grid_load_no_get", grid_load_no_get, 0, 0 },
+    { "grid_load_no_reply", grid_load_no_reply, 0, 0 },
+    { "grid_load_no_div", grid_load_no_div, 0, 0 },
+    { "grid_load_unlag_only", grid_load_unlag_only, 0, 0 },
+    { "grid_load_framediv_only", grid_load_framediv_only, 0, 0 },
+    { "grid_load_api3", grid_load_api3, 0, 0 },
+    { "grid_load_production", grid_load_production, 0, 0 },
+    { "grid_load_peer", grid_load_peer, 0, 0 },
+#endif
     { "pacing_single_pause", pacing_single_pause },
     { "pacing_window_boundary", pacing_window_boundary },
     { "pacing_unfinished_silence", pacing_unfinished_silence },
@@ -1908,6 +2015,12 @@ int main(int argc, char **argv)
         printf("client %s @%d Hz updaterate %d kind %s%s\n", argv[1], h_rate, h_update,
                getenv("CL_KIND") ? getenv("CL_KIND") : "new", USE_FPS ? "" : " (no USE_FPS)");
         h_scenarios[i].run();
+#ifdef H_GRID_TESTS
+        if (h_skipped && !h_failures) {
+            fflush(stdout);
+            _exit(77);
+        }
+#endif
         if (getenv("CL_VERBOSE"))
             for (int j = 0; j < h_nframes && j < (int)q_countof(h_frames); j++)
                 printf("  frame %d delta %d old %d flags %#x sd %d st %d key %d div %d ep %d pb %d ent %d x %d/%d lerp %d psdup %d\n",

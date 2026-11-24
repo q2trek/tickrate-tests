@@ -16,6 +16,8 @@ extern void h_game_think(edict_t *ent, usercmd_t *cmd) __attribute__((weak));
 extern void h_game_unlag(const unlag_api_v1_t *api) __attribute__((weak));
 extern void h_game_unlag_think(const unlag_api_v1_t *api, edict_t *ent, edict_t *other) __attribute__((weak));
 
+extern const game_export_ex_t *h_framediv_exports(const game_import_ex_t *) __attribute__((weak));
+
 #define H_MAX_EDICTS 64
 static game_import_t gi;
 static game_export_t ge;
@@ -38,7 +40,10 @@ static void G_Init(void)
     ge.num_edicts = H_MAX_EDICTS;
     ge.max_edicts = H_MAX_EDICTS;
     char f[16];
-    snprintf(f, sizeof(f), "%d", GMF_VARIABLE_FPS | GMF_MVDSPEC);   /* MVD dummy client for mvdrecord */
+    int features = GMF_VARIABLE_FPS | GMF_MVDSPEC;
+    if (getenv("H_GAME_EXT"))
+        features |= GMF_PROTOCOL_EXTENSIONS;
+    snprintf(f, sizeof(f), "%d", features);
     gi.cvar_forceset("g_features", f);
 }
 
@@ -111,5 +116,7 @@ q_exported const game_export_ex_t *GetGameAPIEx(const game_import_ex_t *import)
         .structsize = sizeof(exports),
     };
     unlag = import->GetExtension(UNLAG_API_V1);
+    if (h_framediv_exports && getenv("H_GAME_EXT"))
+        return h_framediv_exports(import);
     return &exports;
 }
